@@ -1,7 +1,7 @@
 import pandas as pd
 import numpy as np
 from dataclasses import dataclass
-from typing import Optional
+from typing import Optional, Tuple
 from config import (
     MIN_GAP_PCT, MAX_WICK_RATIO, AGGR_FACTOR, AVG_BODY_PERIOD,
     RSI_PERIOD, RSI_BULL, RSI_BEAR,
@@ -25,7 +25,7 @@ class FVGSetup:
     candle_time: pd.Timestamp
 
 
-def calc_rsi(series: pd.Series, period: int = 14) -> pd.Series:
+def calc_rsi(series, period=14):
     delta    = series.diff()
     gain     = delta.clip(lower=0)
     loss     = -delta.clip(upper=0)
@@ -35,11 +35,11 @@ def calc_rsi(series: pd.Series, period: int = 14) -> pd.Series:
     return 100 - (100 / (1 + rs))
 
 
-def calc_ema(series: pd.Series, period: int) -> pd.Series:
+def calc_ema(series, period):
     return series.ewm(span=period, min_periods=period, adjust=False).mean()
 
 
-def prepare_df(raw_klines: list) -> pd.DataFrame:
+def prepare_df(raw_klines):
     df = pd.DataFrame(raw_klines, columns=[
         "timestamp","open","high","low","close","volume",
         "close_time","quote_vol","trades","taker_buy_base","taker_buy_quote","ignore"
@@ -80,14 +80,14 @@ def _check_ema_filters(df, direction):
             return False, "EMA50 deasupra EMA100 in BEAR", ef_now, es_now, slope_fast
 
     if abs(slope_fast) < EMA_MIN_SLOPE:
-        return False, f"Panta EMA50 prea mica", ef_now, es_now, slope_fast
+        return False, "Panta EMA50 prea mica", ef_now, es_now, slope_fast
     if abs(slope_slow) < EMA_MIN_SLOPE * 0.5:
-        return False, f"Panta EMA100 prea mica", ef_now, es_now, slope_fast
+        return False, "Panta EMA100 prea mica", ef_now, es_now, slope_fast
 
     if abs(slope_slow) > 0:
         ratio = abs(slope_fast) / abs(slope_slow)
         if ratio < EMA_PARALLEL_MIN or ratio > EMA_PARALLEL_MAX:
-            return False, f"EMA nu sunt paralele", ef_now, es_now, slope_fast
+            return False, "EMA nu sunt paralele", ef_now, es_now, slope_fast
 
     return True, "OK", ef_now, es_now, slope_fast
 
@@ -105,11 +105,11 @@ def _check_overextension(df, avg_body, direction):
         else:
             break
     if consec >= MAX_CONSEC_AGGR:
-        return False, f"Supraextindere: {consec} lumanari"
+        return False, "Supraextindere: " + str(consec) + " lumanari"
     return True, "OK"
 
 
-def detect_fvg(symbol: str, df: pd.DataFrame) -> Optional[FVGSetup]:
+def detect_fvg(symbol, df):
     min_len = max(AVG_BODY_PERIOD, RSI_PERIOD * 3, EMA_SLOW + EMA_SLOPE_BARS) + 10
     if len(df) < min_len:
         return None
@@ -137,7 +137,11 @@ def detect_fvg(symbol: str, df: pd.DataFrame) -> Optional[FVGSetup]:
         return None
 
     current_price = c0["close"]
-    direction = entry = sl = tp = risk = None
+    direction = None
+    entry = None
+    sl    = None
+    tp    = None
+    risk  = None
 
     if c1["close"] > c1["open"] and rsi_c1 >= RSI_BULL:
         direction = "BULL"
@@ -190,3 +194,4 @@ def detect_fvg(symbol: str, df: pd.DataFrame) -> Optional[FVGSetup]:
         ema_slow    = round(es_val, 6),
         slope_fast  = round(slope_f * 100, 3),
         candle_time = c0.name
+    )
