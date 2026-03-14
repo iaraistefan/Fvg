@@ -6,7 +6,7 @@ API_SECRET = os.environ.get("API_SECRET", "")
 TIMEFRAME  = "4h"
 
 LEVERAGE        = 10
-USDT_PER_TRADE  = 20
+USDT_PER_TRADE  = 7    # redus de la 20 — evita pozitii prea mari
 
 MIN_GAP_PCT      = 0.009
 MAX_WICK_RATIO   = 0.20
@@ -30,7 +30,11 @@ SCAN_INTERVAL_SEC  = 60
 MAX_OPEN_TRADES    = 15
 ORDER_EXPIRY_HOURS = 8
 
-BLACKLIST = ["BTCDOMUSDT", "DEFIUSDT", "XPDUSDT"]
+# 1000WHYUSDT adaugat — da erori repetate la plasare ordin
+BLACKLIST = [
+    "BTCDOMUSDT", "DEFIUSDT", "XPDUSDT",
+    "1000WHYUSDT", "USDCUSDT",
+]
 
 TELEGRAM_ENABLED      = True
 TELEGRAM_TOKEN        = os.environ.get("TELEGRAM_TOKEN", "")
