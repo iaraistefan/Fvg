@@ -167,52 +167,88 @@ class OrderManager:
 
     # ── SL/TP via ordine standard ──────────────────────────────
 
+    def _place_single_order(self, symbol: str, side: str,
+                            order_type: str, price: float,
+                            qty: float) -> str:
+        """
+        Incearca sa plaseze un ordin standard.
+        Daca da -4120 (necesita algo), foloseste algo endpoint automat.
+        Returneaza order_id ca string sau "ERR".
+        """
+        import hmac, hashlib, requests, time as _time
+
+        # Incearca standard
+        try:
+            order = self.client.futures_create_order(
+                symbol      = symbol,
+                side        = side,
+                type        = order_type,
+                stopPrice   = price,
+                quantity    = qty,
+                reduceOnly  = True,
+                timeInForce = "GTC",
+                workingType = "CONTRACT_PRICE",
+            )
+            oid = str(order.get("orderId", "?"))
+            logger.info(f"[{symbol}] {order_type} standard plasat la {price} (id={oid})")
+            return oid
+        except Exception as e:
+            err_str = str(e)
+            if "-4120" not in err_str:
+                logger.error(f"[{symbol}] {order_type} error: {e}")
+                return "ERR"
+            logger.info(f"[{symbol}] Standard nu suportat — incerc algo endpoint...")
+
+        # Fallback: algo endpoint
+        FAPI = "https://fapi.binance.com"
+        algo_type = "STOP_MARKET" if order_type == "STOP_MARKET" else "TAKE_PROFIT_MARKET"
+        params = {
+            "symbol":       symbol,
+            "side":         side,
+            "type":         algo_type,
+            "algoType":     "CONDITIONAL",
+            "triggerPrice": str(price),
+            "quantity":     str(qty),
+            "reduceOnly":   "true",
+            "workingType":  "CONTRACT_PRICE",
+            "timestamp":    int(_time.time() * 1000),
+            "recvWindow":   5000,
+        }
+        query   = "&".join(f"{k}={v}" for k, v in sorted(params.items()))
+        sig     = hmac.new(
+            config.API_SECRET.encode(), query.encode(), hashlib.sha256
+        ).hexdigest()
+        params["signature"] = sig
+        try:
+            r    = requests.post(
+                url     = f"{FAPI}/fapi/v1/algoOrder",
+                data    = params,
+                headers = {"X-MBX-APIKEY": config.API_KEY},
+                timeout = 15,
+            )
+            resp = r.json()
+            oid  = str(resp.get("clientAlgoId", resp.get("orderId", "?")))
+            logger.info(f"[{symbol}] {order_type} algo plasat la {price} (id={oid})")
+            return oid
+        except Exception as e2:
+            logger.error(f"[{symbol}] {order_type} algo error: {e2}")
+            return "ERR"
+
     def _place_sl_tp(self, symbol: str, direction: str,
                      sl: float, tp: float, qty: float) -> tuple:
         """
-        Plaseaza SL si TP via ordine STOP_MARKET / TAKE_PROFIT_MARKET standard.
-        Acestea functioneaza pe TOATE simbolurile spre deosebire de algoOrder.
+        Plaseaza SL si TP cu fallback automat:
+        1. Incearca standard STOP_MARKET / TAKE_PROFIT_MARKET
+        2. Daca da -4120 → foloseste /fapi/v1/algoOrder automat
         """
         close_side = "SELL" if direction == "BULL" else "BUY"
-        sl_id = tp_id = "ERR"
 
         # Rotunjeste preturile
         sl = self._round_price(symbol, sl)
         tp = self._round_price(symbol, tp)
 
-        # Stop Loss
-        try:
-            sl_order = self.client.futures_create_order(
-                symbol      = symbol,
-                side        = close_side,
-                type        = "STOP_MARKET",
-                stopPrice   = sl,
-                quantity    = qty,
-                reduceOnly  = True,
-                timeInForce = "GTC",
-                workingType = "CONTRACT_PRICE",
-            )
-            sl_id = str(sl_order.get("orderId", "?"))
-            logger.info(f"[{symbol}] SL plasat la {sl} (id={sl_id})")
-        except Exception as e:
-            logger.error(f"[{symbol}] SL error: {e}")
-
-        # Take Profit
-        try:
-            tp_order = self.client.futures_create_order(
-                symbol      = symbol,
-                side        = close_side,
-                type        = "TAKE_PROFIT_MARKET",
-                stopPrice   = tp,
-                quantity    = qty,
-                reduceOnly  = True,
-                timeInForce = "GTC",
-                workingType = "CONTRACT_PRICE",
-            )
-            tp_id = str(tp_order.get("orderId", "?"))
-            logger.info(f"[{symbol}] TP plasat la {tp} (id={tp_id})")
-        except Exception as e:
-            logger.error(f"[{symbol}] TP error: {e}")
+        sl_id = self._place_single_order(symbol, close_side, "STOP_MARKET",        sl, qty)
+        tp_id = self._place_single_order(symbol, close_side, "TAKE_PROFIT_MARKET", tp, qty)
 
         return sl_id, tp_id
 
