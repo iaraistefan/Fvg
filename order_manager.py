@@ -227,7 +227,18 @@ class OrderManager:
                 timeout = 15,
             )
             resp = r.json()
-            oid  = str(resp.get("clientAlgoId", resp.get("orderId", "?")))
+            # Algo endpoint returneaza clientAlgoId in campul "data" sau direct
+            oid = "?"
+            if isinstance(resp, dict):
+                oid = str(
+                    resp.get("clientAlgoId") or
+                    resp.get("orderId") or
+                    (resp.get("data") or {}).get("clientAlgoId") or
+                    "?"
+                )
+            if oid == "?" or oid == "None":
+                logger.warning(f"[{symbol}] Algo response: {resp}")
+                oid = "algo_ok"
             logger.info(f"[{symbol}] {order_type} algo plasat la {price} (id={oid})")
             return oid
         except Exception as e2:
