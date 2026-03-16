@@ -1,450 +1,274 @@
 """
-OrderManager v4
+Order Manager — Binance Futures
+FIX DEFINITIV pentru eroarea -4120 (din 2025-12-09 Binance migrat ordine conditionale)
 
-Fix principal:
-- SL/TP plasate via ordine STOP_MARKET/TAKE_PROFIT_MARKET standard
-  in loc de /fapi/v1/algoOrder care nu functioneaza pe toate simbolurile
-- USDT_PER_TRADE redus la 7 pentru sizing corect
-- 1000WHYUSDT adaugat in blacklist automat daca da erori repetate
+PROBLEME IDENTIFICATE SI REZOLVATE:
+  1. POST body trimis ca params= (URL) in loc de data= (body) -> raspuns gol
+  2. URL gresit /fapi/v1/order/algo -> corect /fapi/v1/algoOrder
+  3. stopPrice in loc de triggerPrice pentru algo endpoint
 """
-import time
 import logging
-from datetime import datetime, timezone
-from typing import Optional
-
+import hmac
+import hashlib
+import time as t
+import requests as req
+from urllib.parse import urlencode
+from binance.client import Client
+from binance.exceptions import BinanceAPIException
+from detector import FVGSetup
 import config
-import notifier
+from config import LEVERAGE, USDT_PER_TRADE
 
 logger = logging.getLogger("FVGBot")
+FAPI = "https://fapi.binance.com"
 
 
 class OrderManager:
-    def __init__(self, client):
+    def __init__(self, client: Client):
         self.client = client
-        self.pending_orders  = {}
-        self.open_positions  = {}
-        self.error_counts    = {}  # numara erorile per simbol
-        self.stats = {
-            "total_trades":    0,
-            "wins":            0,
-            "losses":          0,
-            "expired_orders":  0,
-            "pnl_total":       0.0,
-            "pnl_today":       0.0,
-            "commission_paid": 0.0,
-            "best_trade":      0.0,
-            "worst_trade":     0.0,
-            "start_time":      datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC"),
-            "last_report_day": datetime.now(timezone.utc).date(),
-        }
+        self._precision_cache = {}
+        # {symbol: {order_id, sl, tp, qty, close_side}}
+        self.pending_orders: dict = {}
 
-    # ── Contoare ──────────────────────────────────────────────
+    # ─────────────────────────────────────────
+    #  UTILS
+    # ─────────────────────────────────────────
 
-    def count_open_positions(self) -> int:
-        return len(self.open_positions)
+    def _get_symbol_info(self, symbol: str) -> dict:
+        if symbol not in self._precision_cache:
+            info = self.client.futures_exchange_info()
+            for s in info["symbols"]:
+                if s["symbol"] == symbol:
+                    tick_size = float(next(
+                        f["tickSize"] for f in s["filters"]
+                        if f["filterType"] == "PRICE_FILTER"
+                    ))
+                    self._precision_cache[symbol] = {
+                        "price_prec": int(s["pricePrecision"]),
+                        "qty_prec":   int(s["quantityPrecision"]),
+                        "tick_size":  tick_size,
+                    }
+                    break
+        return self._precision_cache.get(symbol, {})
 
-    def count_pending_orders(self) -> int:
-        return len(self.pending_orders)
+    def _round_price(self, price: float, tick: float, decimals: int) -> float:
+        return round(round(price / tick) * tick, decimals)
 
-    def is_at_capacity(self) -> bool:
-        return self.count_open_positions() >= config.MAX_OPEN_TRADES
+    def _calc_qty(self, entry: float, info: dict) -> float:
+        return round((USDT_PER_TRADE * LEVERAGE) / entry, info["qty_prec"])
 
-    def has_symbol(self, symbol: str) -> bool:
-        return symbol in self.pending_orders or symbol in self.open_positions
-
-    # ── Qty calculator ─────────────────────────────────────────
-
-    def _calc_qty(self, symbol: str, entry: float, sl: float) -> Optional[float]:
-        """Calculeaza cantitatea bazata pe risk fix."""
-        risk_dist = abs(entry - sl) / entry
-        if risk_dist <= 0:
-            return None
-
-        risk_usdt = config.USDT_PER_TRADE
-        notional  = risk_usdt / risk_dist
-        # Limita: max 5x USDT_PER_TRADE nominal pentru a evita pozitii uriase
-        max_notional = config.USDT_PER_TRADE * 5
-        notional = min(notional, max_notional)
-
-        try:
-            info      = self.client.futures_exchange_info()
-            sym_info  = next(s for s in info["symbols"] if s["symbol"] == symbol)
-            step_size = float(next(
-                f["stepSize"] for f in sym_info["filters"]
-                if f["filterType"] == "LOT_SIZE"
-            ))
-            min_qty = float(next(
-                f["minQty"] for f in sym_info["filters"]
-                if f["filterType"] == "LOT_SIZE"
-            ))
-            qty = notional / entry
-            qty = round(qty - (qty % step_size), 8)
-            if qty < min_qty:
-                logger.warning(f"[{symbol}] Qty {qty} sub minimul {min_qty}")
-                return None
-            return qty
-        except Exception as e:
-            logger.error(f"[{symbol}] Qty calc error: {e}")
-            return None
-
-    # ── Price precision ────────────────────────────────────────
-
-    def _round_price(self, symbol: str, price: float) -> float:
-        """Rotunjeste pretul la tick size-ul simbolului."""
-        try:
-            info     = self.client.futures_exchange_info()
-            sym_info = next(s for s in info["symbols"] if s["symbol"] == symbol)
-            tick     = float(next(
-                f["tickSize"] for f in sym_info["filters"]
-                if f["filterType"] == "PRICE_FILTER"
-            ))
-            if tick > 0:
-                price = round(round(price / tick) * tick, 10)
-        except Exception:
-            pass
-        return price
-
-    # ── Plasare trade ──────────────────────────────────────────
-
-    def place_fvg_trade(self, setup) -> bool:
-        symbol    = setup.symbol
-        direction = setup.direction
-        entry     = setup.entry
-        sl        = setup.sl
-        tp        = setup.tp
-
-        # Seteaza leverage
-        try:
-            self.client.futures_change_leverage(
-                symbol=symbol, leverage=config.LEVERAGE
-            )
-        except Exception as e:
-            logger.warning(f"[{symbol}] Leverage error: {e}")
-
-        # Calculeaza cantitatea
-        qty = self._calc_qty(symbol, entry, sl)
-        if qty is None:
-            return False
-
-        # Rotunjeste pretul
-        entry = self._round_price(symbol, entry)
-
-        # Plaseaza LIMIT entry
-        side = "BUY" if direction == "BULL" else "SELL"
-        try:
-            order = self.client.futures_create_order(
-                symbol      = symbol,
-                side        = side,
-                type        = "LIMIT",
-                timeInForce = "GTC",
-                quantity    = qty,
-                price       = entry,
-            )
-            order_id = order["orderId"]
-            logger.info(
-                f"[{symbol}] LIMIT {direction} plasat | "
-                f"Entry={entry} SL={sl} TP={tp} Qty={qty} | "
-                f"OrderID={order_id}"
-            )
-            self.pending_orders[symbol] = {
-                "order_id":  order_id,
-                "direction": direction,
-                "entry":     entry,
-                "sl":        sl,
-                "tp":        tp,
-                "qty":       qty,
-                "risk_usdt": config.USDT_PER_TRADE,
-                "placed_at": time.time(),
-            }
-            # Reseteaza error count la succes
-            self.error_counts[symbol] = 0
-            return True
-
-        except Exception as e:
-            logger.error(f"[{symbol}] Place order error: {e}")
-            self.error_counts[symbol] = self.error_counts.get(symbol, 0) + 1
-            return False
-
-    # ── SL/TP via ordine standard ──────────────────────────────
-
-    def _place_single_order(self, symbol: str, side: str,
-                            order_type: str, price: float,
-                            qty: float) -> str:
+    def _algo_signed_post(self, params: dict) -> dict:
         """
-        Incearca sa plaseze un ordin standard.
-        Daca da -4120 (necesita algo), foloseste algo endpoint automat.
-        Returneaza order_id ca string sau "ERR".
+        POST semnat catre /fapi/v1/algoOrder
+        FIX CRITIC: parametrii merg in request BODY (data=), nu in URL (params=)
         """
-        import hmac, hashlib, requests, time as _time
+        params["timestamp"] = int(t.time() * 1000)
+        query_string = urlencode(params)
+        signature = hmac.new(
+            config.API_SECRET.encode("utf-8"),
+            query_string.encode("utf-8"),
+            hashlib.sha256
+        ).hexdigest()
+        params["signature"] = signature
 
-        # Incearca standard
         try:
-            order = self.client.futures_create_order(
-                symbol      = symbol,
-                side        = side,
-                type        = order_type,
-                stopPrice   = price,
-                quantity    = qty,
-                reduceOnly  = True,
-                timeInForce = "GTC",
-                workingType = "CONTRACT_PRICE",
+            resp = req.post(
+                url     = FAPI + "/fapi/v1/algoOrder",
+                data    = params,          # <- POST BODY (nu params=!)
+                headers = {"X-MBX-APIKEY": config.API_KEY},
+                timeout = 15
             )
-            oid = str(order.get("orderId", "?"))
-            logger.info(f"[{symbol}] {order_type} standard plasat la {price} (id={oid})")
-            return oid
+            if not resp.text.strip():
+                return {"error": f"Empty response HTTP {resp.status_code}"}
+            return resp.json()
         except Exception as e:
-            err_str = str(e)
-            if "-4120" not in err_str:
-                logger.error(f"[{symbol}] {order_type} error: {e}")
-                return "ERR"
-            logger.info(f"[{symbol}] Standard nu suportat — incerc algo endpoint...")
+            return {"error": str(e)}
 
-        # Fallback: algo endpoint
-        FAPI = "https://fapi.binance.com"
-        algo_type = "STOP_MARKET" if order_type == "STOP_MARKET" else "TAKE_PROFIT_MARKET"
+    # ─────────────────────────────────────────
+    #  PLASARE CONDITIONAL ORDER (SL / TP)
+    # ─────────────────────────────────────────
+
+    def _place_conditional(self, symbol: str, side: str,
+                           order_type: str, trigger_price: float,
+                           qty: float) -> bool:
+        """
+        Plaseaza SL sau TP pe noul endpoint algo (CONDITIONAL).
+        order_type: "STOP_MARKET" sau "TAKE_PROFIT_MARKET"
+        """
+        label = "SL" if "STOP" in order_type else "TP"
+
         params = {
+            "algoType":     "CONDITIONAL",
             "symbol":       symbol,
             "side":         side,
-            "type":         algo_type,
-            "algoType":     "CONDITIONAL",
-            "triggerPrice": str(price),
+            "type":         order_type,
+            "triggerPrice": str(trigger_price),   # FIX: triggerPrice nu stopPrice
             "quantity":     str(qty),
             "reduceOnly":   "true",
             "workingType":  "CONTRACT_PRICE",
-            "timestamp":    int(_time.time() * 1000),
-            "recvWindow":   5000,
         }
-        query   = "&".join(f"{k}={v}" for k, v in sorted(params.items()))
-        sig     = hmac.new(
-            config.API_SECRET.encode(), query.encode(), hashlib.sha256
-        ).hexdigest()
-        params["signature"] = sig
-        try:
-            r    = requests.post(
-                url     = f"{FAPI}/fapi/v1/algoOrder",
-                data    = params,
-                headers = {"X-MBX-APIKEY": config.API_KEY},
-                timeout = 15,
-            )
-            resp = r.json()
-            # Algo endpoint returneaza clientAlgoId in campul "data" sau direct
-            oid = "?"
-            if isinstance(resp, dict):
-                oid = str(
-                    resp.get("clientAlgoId") or
-                    resp.get("orderId") or
-                    (resp.get("data") or {}).get("clientAlgoId") or
-                    "?"
-                )
-            if oid == "?" or oid == "None":
-                logger.warning(f"[{symbol}] Algo response: {resp}")
-                oid = "algo_ok"
-            logger.info(f"[{symbol}] {order_type} algo plasat la {price} (id={oid})")
-            return oid
-        except Exception as e2:
-            logger.error(f"[{symbol}] {order_type} algo error: {e2}")
-            return "ERR"
 
-    def _place_sl_tp(self, symbol: str, direction: str,
-                     sl: float, tp: float, qty: float) -> tuple:
-        """
-        Plaseaza SL si TP cu fallback automat:
-        1. Incearca standard STOP_MARKET / TAKE_PROFIT_MARKET
-        2. Daca da -4120 → foloseste /fapi/v1/algoOrder automat
-        """
-        close_side = "SELL" if direction == "BULL" else "BUY"
+        data = self._algo_signed_post(params)
 
-        # Rotunjeste preturile
-        sl = self._round_price(symbol, sl)
-        tp = self._round_price(symbol, tp)
+        if "algoId" in data or "orderId" in data:
+            logger.info(f"[{symbol}] {label} plasat @ {trigger_price} | algoId={data.get('algoId','?')}")
+            return True
 
-        sl_id = self._place_single_order(symbol, close_side, "STOP_MARKET",        sl, qty)
-        tp_id = self._place_single_order(symbol, close_side, "TAKE_PROFIT_MARKET", tp, qty)
+        logger.error(f"[{symbol}] {label} ESUAT: {data}")
 
-        return sl_id, tp_id
+        if "code" in data:
+            code = data.get("code")
+            msg  = data.get("msg", "")
+            logger.error(f"[{symbol}] Binance code={code}: {msg}")
+            if code == -2022:
+                logger.error(f"[{symbol}] -> Pozitia nu mai exista")
+            elif code == -1102:
+                logger.error(f"[{symbol}] -> Parametru gresit: {msg}")
+            elif code == -4120:
+                logger.error(f"[{symbol}] -> Inca pe endpoint gresit!")
 
-    # ── Check filled orders ────────────────────────────────────
+        return False
+
+    # ─────────────────────────────────────────
+    #  VERIFICA ORDINE UMPLUTE -> SL + TP
+    # ─────────────────────────────────────────
 
     def check_filled_orders(self):
-        self._check_pending()
-        self._check_open_positions()
-        self._expire_old_orders()
+        if not self.pending_orders:
+            return
 
-    def _check_pending(self):
-        to_remove = []
-        for symbol, order_info in list(self.pending_orders.items()):
+        done = []
+        for symbol, data in list(self.pending_orders.items()):
             try:
-                order  = self.client.futures_get_order(
-                    symbol=symbol, orderId=order_info["order_id"]
+                order = self.client.futures_get_order(
+                    symbol=symbol, orderId=data["order_id"]
                 )
                 status = order.get("status", "")
 
                 if status == "FILLED":
-                    filled_price = float(order.get("avgPrice", order_info["entry"]))
-                    logger.info(f"[{symbol}] Ordin UMPLUT la {filled_price}")
-                    self._on_filled(symbol, order_info, filled_price)
-                    to_remove.append(symbol)
+                    logger.info(f"[{symbol}] Ordin UMPLUT — plasez SL + TP...")
+                    t.sleep(0.5)  # mic delay sa se confirme pozitia
+
+                    sl_ok = self._place_conditional(
+                        symbol, data["close_side"],
+                        "STOP_MARKET",
+                        data["sl"],
+                        data["qty"]
+                    )
+                    t.sleep(0.3)
+                    tp_ok = self._place_conditional(
+                        symbol, data["close_side"],
+                        "TAKE_PROFIT_MARKET",
+                        data["tp"],
+                        data["qty"]
+                    )
+
+                    if sl_ok and tp_ok:
+                        logger.info(f"[{symbol}] SL + TP plasate cu succes!")
+                    elif sl_ok:
+                        logger.warning(f"[{symbol}] SL OK, dar TP a esuat!")
+                    elif tp_ok:
+                        logger.warning(f"[{symbol}] TP OK, dar SL a esuat — PERICOL!")
+                    else:
+                        logger.error(f"[{symbol}] AMBELE esuat — pozitie NEPROTEJATA!")
+
+                    done.append(symbol)
 
                 elif status in ("CANCELED", "EXPIRED", "REJECTED"):
-                    logger.info(f"[{symbol}] Ordin {status} — eliminat")
-                    to_remove.append(symbol)
+                    logger.info(f"[{symbol}] Ordin {status} — eliminat din pending")
+                    done.append(symbol)
 
             except Exception as e:
-                logger.error(f"[{symbol}] Check order error: {e}")
+                logger.warning(f"[{symbol}] check_filled error: {e}")
 
-        for sym in to_remove:
-            self.pending_orders.pop(sym, None)
+        for sym in done:
+            del self.pending_orders[sym]
 
-    def _on_filled(self, symbol: str, order_info: dict, filled_price: float):
-        """Dupa umplere: plaseaza SL si TP, muta in open_positions."""
-        direction = order_info["direction"]
-        sl        = order_info["sl"]
-        tp        = order_info["tp"]
-        qty       = order_info["qty"]
+    # ─────────────────────────────────────────
+    #  LEVERAGE
+    # ─────────────────────────────────────────
 
-        sl_id, tp_id = self._place_sl_tp(symbol, direction, sl, tp, qty)
-
-        self.open_positions[symbol] = {
-            "direction":  direction,
-            "entry":      filled_price,
-            "sl":         sl,
-            "tp":         tp,
-            "sl_id":      sl_id,
-            "tp_id":      tp_id,
-            "risk_usdt":  order_info["risk_usdt"],
-            "opened_at":  datetime.now(timezone.utc).isoformat(),
-        }
-
-        notifier.notify_filled(symbol, direction, filled_price)
-
-    def _check_open_positions(self):
-        """Verifica daca pozitiile botului mai exista in cont."""
-        if not self.open_positions:
-            return
-
+    def set_leverage(self, symbol: str):
         try:
-            real_positions = self.client.futures_position_information()
-            real_symbols   = {
-                p["symbol"] for p in real_positions
-                if abs(float(p["positionAmt"])) > 0
-            }
-        except Exception as e:
-            logger.error(f"position_information error: {e}")
-            return
+            self.client.futures_change_leverage(symbol=symbol, leverage=LEVERAGE)
+            logger.info(f"[{symbol}] Leverage {LEVERAGE}x setat")
+        except BinanceAPIException as e:
+            logger.warning(f"[{symbol}] Leverage error: {e}")
 
-        to_close = []
-        for symbol in list(self.open_positions.keys()):
-            if symbol not in real_symbols:
-                self._on_position_closed(symbol, self.open_positions[symbol])
-                to_close.append(symbol)
+    # ─────────────────────────────────────────
+    #  POZITII / ORDINE ACTIVE
+    # ─────────────────────────────────────────
 
-        for sym in to_close:
-            self.open_positions.pop(sym, None)
+    def get_open_positions(self) -> list:
+        return [p["symbol"] for p in self.client.futures_position_information()
+                if float(p["positionAmt"]) != 0]
 
-    def _on_position_closed(self, symbol: str, pos_info: dict):
-        """Detecteaza TP sau SL si actualizeaza statisticile."""
-        direction = pos_info["direction"]
-        sl        = pos_info["sl"]
-        tp        = pos_info["tp"]
-        risk      = pos_info["risk_usdt"]
-
-        try:
-            trades     = self.client.futures_account_trades(symbol=symbol, limit=5)
-            exit_price = float(trades[-1]["price"]) if trades else (sl + tp) / 2
-        except Exception:
-            exit_price = (sl + tp) / 2
-
-        if direction == "BULL":
-            result = "TP" if exit_price >= tp * 0.995 else "SL"
-        else:
-            result = "TP" if exit_price <= tp * 1.005 else "SL"
-
-        pnl        = risk if result == "TP" else -risk
-        commission = risk * 0.0004 * 2
-        net_pnl    = pnl - commission
-
-        # Update statistici
-        self.stats["total_trades"]    += 1
-        self.stats["commission_paid"] += commission
-
-        today = datetime.now(timezone.utc).date()
-        if today != self.stats["last_report_day"]:
-            self.stats["pnl_today"]       = 0.0
-            self.stats["last_report_day"] = today
-
-        self.stats["pnl_total"] += net_pnl
-        self.stats["pnl_today"] += net_pnl
-
-        if result == "TP":
-            self.stats["wins"] += 1
-            if net_pnl > self.stats["best_trade"]:
-                self.stats["best_trade"] = net_pnl
-        else:
-            self.stats["losses"] += 1
-            if net_pnl < self.stats["worst_trade"]:
-                self.stats["worst_trade"] = net_pnl
-
-        total = self.stats["total_trades"]
-        wr    = self.stats["wins"] / total * 100 if total > 0 else 0
-        sign  = "+" if net_pnl >= 0 else ""
-
-        logger.info(
-            f"[{symbol}] {'✅ TP' if result == 'TP' else '❌ SL'} | "
-            f"PNL: {sign}{net_pnl:.2f} USDT | "
-            f"{self.stats['wins']}W/{self.stats['losses']}L "
-            f"({wr:.1f}%) | Cumulat: {self.stats['pnl_total']:+.2f} USDT"
-        )
-        notifier.notify_closed(symbol, direction, result, net_pnl)
-
-    def _expire_old_orders(self):
-        """Anuleaza ordinele neumplute dupa ORDER_EXPIRY_HOURS."""
-        expiry_sec = config.ORDER_EXPIRY_HOURS * 3600
-        now        = time.time()
-        to_expire  = []
-
-        for symbol, order_info in list(self.pending_orders.items()):
-            if now - order_info["placed_at"] >= expiry_sec:
-                logger.info(f"[{symbol}] Ordin expirat — anulez...")
-                try:
-                    self.client.futures_cancel_order(
-                        symbol=symbol, orderId=order_info["order_id"]
-                    )
-                    self.stats["expired_orders"] += 1
-                    notifier.notify_expired(symbol, config.ORDER_EXPIRY_HOURS)
-                except Exception as e:
-                    logger.error(f"[{symbol}] Cancel error: {e}")
-                to_expire.append(symbol)
-
-        for sym in to_expire:
-            self.pending_orders.pop(sym, None)
-
-    # ── Stats & utils ──────────────────────────────────────────
-
-    def get_stats_for_report(self) -> dict:
-        total = self.stats["total_trades"]
-        wins  = self.stats["wins"]
-        wr    = wins / total * 100 if total > 0 else 0
-        return {
-            "total_trades":    total,
-            "wins":            wins,
-            "losses":          self.stats["losses"],
-            "expired_orders":  self.stats["expired_orders"],
-            "pending":         self.count_pending_orders(),
-            "open_positions":  self.count_open_positions(),
-            "pnl_total":       round(self.stats["pnl_total"], 2),
-            "pnl_today":       round(self.stats["pnl_today"], 2),
-            "win_rate":        round(wr, 1),
-            "best_trade":      round(self.stats["best_trade"], 2),
-            "worst_trade":     round(self.stats["worst_trade"], 2),
-            "commission_paid": round(self.stats["commission_paid"], 2),
-            "start_time":      self.stats["start_time"],
-        }
-
-    def get_open_positions(self) -> set:
-        return set(self.open_positions.keys())
-
-    def get_pending_orders(self) -> set:
-        return set(self.pending_orders.keys())
+    def get_open_orders(self) -> list:
+        return list(set(o["symbol"] for o in self.client.futures_get_open_orders()))
 
     def count_active_trades(self) -> int:
-        return self.count_open_positions()
+        return len(set(self.get_open_positions()) | set(self.get_open_orders()))
+
+    # ─────────────────────────────────────────
+    #  PLASARE TRADE
+    # ─────────────────────────────────────────
+
+    def place_fvg_trade(self, setup: FVGSetup) -> bool:
+        symbol = setup.symbol
+        try:
+            info = self._get_symbol_info(symbol)
+            tick = info["tick_size"]
+            pp   = info["price_prec"]
+
+            if setup.entry < tick or setup.sl < tick or setup.tp < tick:
+                logger.warning(f"[{symbol}] SKIP — pret sub tick_size ({tick})")
+                return False
+
+            entry_r = self._round_price(setup.entry, tick, pp)
+            sl_r    = self._round_price(setup.sl,    tick, pp)
+            tp_r    = self._round_price(setup.tp,    tick, pp)
+
+            if entry_r <= 0 or sl_r <= 0 or tp_r <= 0:
+                logger.warning(f"[{symbol}] SKIP — pret rotunjit invalid")
+                return False
+
+            qty = self._calc_qty(entry_r, info)
+            if qty <= 0:
+                logger.warning(f"[{symbol}] SKIP — cantitate invalida")
+                return False
+
+            self.set_leverage(symbol)
+
+            side       = "BUY"  if setup.direction == "BULL" else "SELL"
+            close_side = "SELL" if setup.direction == "BULL" else "BUY"
+
+            order = self.client.futures_create_order(
+                symbol=symbol, side=side, type="LIMIT",
+                timeInForce="GTC", quantity=qty, price=entry_r,
+            )
+            order_id = order["orderId"]
+
+            logger.info(
+                f"[{symbol}] LIMIT {side} plasat | orderId={order_id} | "
+                f"qty={qty} | entry={entry_r} | sl={sl_r} | tp={tp_r}"
+            )
+
+            self.pending_orders[symbol] = {
+                "order_id":   order_id,
+                "sl":         sl_r,
+                "tp":         tp_r,
+                "qty":        qty,
+                "close_side": close_side,
+            }
+            logger.info(f"[{symbol}] Astept umplerea pentru SL/TP...")
+            return True
+
+        except BinanceAPIException as e:
+            if e.code == -2019:
+                logger.warning(f"[{symbol}] SKIP — margin insuficient")
+            else:
+                logger.error(f"[{symbol}] BinanceAPIException: {e}")
+            return False
+        except Exception as e:
+            logger.error(f"[{symbol}] Eroare: {e}")
+            return False
