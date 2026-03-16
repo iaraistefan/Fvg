@@ -1,6 +1,3 @@
-
-Copy
-
 """
 FVG WITH-TREND BOT v3 — versiune stabila
 """
@@ -9,19 +6,19 @@ import io
 import time
 import logging
 from datetime import datetime, timezone
- 
+
 from binance.client import Client
 from binance.exceptions import BinanceAPIException
- 
+
 import config
 from detector import detect_fvg, prepare_df
 from order_manager import OrderManager
 from notifier import notify_setup, notify_trade, notify_error, send_statistics_report
- 
+
 if sys.platform == "win32":
     sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding="utf-8", errors="replace")
     sys.stderr = io.TextIOWrapper(sys.stderr.buffer, encoding="utf-8", errors="replace")
- 
+
 logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s [%(levelname)s] %(message)s",
@@ -31,28 +28,28 @@ logging.basicConfig(
     ]
 )
 logger = logging.getLogger("FVGBot")
- 
- 
+
+
 class FVGBot:
     def __init__(self):
         self.client           = Client(config.API_KEY, config.API_SECRET)
         self.om               = OrderManager(self.client)
         self.last_candle_ts   = {}
         self.last_report_time = time.time()
- 
+
         # Statistici simple
         self.stats = {
             "total": 0, "wins": 0, "losses": 0,
             "pnl": 0.0, "start": datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
         }
- 
+
         logger.info("═══════════════════════════════════════════════════════")
         logger.info("  FVG WITH-TREND BOT v3 pornit")
         logger.info(f"  TF: {config.TIMEFRAME} | Leverage: {config.LEVERAGE}x | USDT/trade: {config.USDT_PER_TRADE}")
         logger.info(f"  EMA: {config.EMA_FAST}/{config.EMA_SLOW} | Slope: {config.EMA_MIN_SLOPE*100:.1f}%/{config.EMA_SLOPE_BARS}bars")
         logger.info(f"  Max pozitii: {config.MAX_OPEN_TRADES} | Expiry: {config.ORDER_EXPIRY_HOURS}h")
         logger.info("═══════════════════════════════════════════════════════")
- 
+
     def get_symbols(self) -> list:
         try:
             info = self.client.futures_exchange_info()
@@ -65,7 +62,7 @@ class FVGBot:
         except Exception as e:
             logger.error(f"get_symbols error: {e}")
             return []
- 
+
     def get_klines(self, symbol: str) -> list:
         try:
             klines = self.client.futures_klines(
@@ -76,55 +73,55 @@ class FVGBot:
             if e.code != -1121:
                 logger.warning(f"[{symbol}] klines error: {e}")
             return []
- 
+
     def count_active(self) -> int:
         """Numara pozitiile + ordinele active ale botului."""
         return self.om.count_active_trades()
- 
+
     def scan_symbol(self, symbol: str):
         klines = self.get_klines(symbol)
         if not klines:
             return
- 
+
         df      = prepare_df(klines)
         last_ts = df.index[-1]
- 
+
         if self.last_candle_ts.get(symbol) == last_ts:
             return
- 
+
         setup = detect_fvg(symbol, df)
         if setup is None:
             return
- 
+
         logger.info(
             f"[{symbol}] FVG {setup.direction} | "
             f"RSI={setup.rsi} | Entry={setup.entry:.6f} | "
             f"SL={setup.sl:.6f} | TP={setup.tp:.6f} | "
             f"Slope={setup.slope_fast:+.3f}%"
         )
- 
+
         # Verifica daca avem deja ordin/pozitie pe simbol
         open_pos    = self.om.get_open_positions()
         open_orders = self.om.get_open_orders()
- 
+
         if symbol in open_pos or symbol in open_orders:
             logger.info(f"[{symbol}] SKIP — ordin/pozitie deja exista")
             self.last_candle_ts[symbol] = last_ts
             return
- 
+
         # Verifica limita MAX_OPEN_TRADES
         active = self.count_active()
         if active >= config.MAX_OPEN_TRADES:
             logger.info(f"[{symbol}] SKIP — limita {config.MAX_OPEN_TRADES} atinsa ({active} active)")
             return
- 
+
         notify_setup(setup)
         success = self.om.place_fvg_trade(setup)
         notify_trade(setup, success)
- 
+
         if success:
             self.last_candle_ts[symbol] = last_ts
- 
+
     def check_and_send_report(self):
         interval = config.TELEGRAM_REPORT_HOURS * 3600
         if time.time() - self.last_report_time >= interval:
@@ -149,19 +146,19 @@ class FVGBot:
             send_statistics_report(stats_data)
             self.last_report_time = time.time()
             logger.info("Raport Telegram trimis.")
- 
+
     def run_cycle(self):
         # 1. Verifica ordine umplute + plaseaza SL/TP
         self.om.check_filled_orders()
- 
+
         active = self.count_active()
         pending = len(self.om.pending_orders)
- 
+
         # 2. Pauza daca la capacitate maxima
         if active >= config.MAX_OPEN_TRADES:
             logger.info(f"PAUZA — {active}/{config.MAX_OPEN_TRADES} pozitii | {pending} pending")
             return
- 
+
         # 3. Scaneaza
         symbols = self.get_symbols()
         logger.info(
@@ -169,7 +166,7 @@ class FVGBot:
             f"Pozitii: {active}/{config.MAX_OPEN_TRADES} | "
             f"Pending: {pending}"
         )
- 
+
         for sym in symbols:
             if self.count_active() >= config.MAX_OPEN_TRADES:
                 logger.info("Limita atinsa — opresc scanarea")
@@ -179,15 +176,15 @@ class FVGBot:
             except Exception as e:
                 logger.error(f"[{sym}] Eroare: {e}")
             time.sleep(0.25)
- 
+
         logger.info(
             f"Ciclu complet | {datetime.now(timezone.utc).strftime('%H:%M:%S')} UTC | "
             f"Pozitii: {self.count_active()}/{config.MAX_OPEN_TRADES} | "
             f"Pending: {len(self.om.pending_orders)}"
         )
- 
+
         self.check_and_send_report()
- 
+
     def run(self):
         logger.info("Bot pornit. Ctrl+C pentru oprire.")
         while True:
@@ -199,10 +196,10 @@ class FVGBot:
             except Exception as e:
                 logger.error(f"Eroare ciclu: {e}")
                 notify_error("Ciclu principal", str(e))
- 
+
             logger.info(f"Astept {config.SCAN_INTERVAL_SEC}s...")
             time.sleep(config.SCAN_INTERVAL_SEC)
- 
- 
+
+
 if __name__ == "__main__":
     FVGBot().run()
