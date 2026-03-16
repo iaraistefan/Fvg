@@ -149,7 +149,14 @@ class FVGBot:
 
     def run_cycle(self):
         # 1. Verifica ordine umplute + plaseaza SL/TP
-        self.om.check_filled_orders()
+        try:
+            self.om.check_filled_orders()
+        except BinanceAPIException as e:
+            if e.code == -1003:
+                logger.warning("Ban activ — astept 3 minute...")
+                time.sleep(180)
+                return
+            raise
 
         active = self.count_active()
         pending = len(self.om.pending_orders)
@@ -175,13 +182,14 @@ class FVGBot:
                 self.scan_symbol(sym)
             except BinanceAPIException as e:
                 if e.code == -1003:
-                    logger.warning("Rate limit atins — astept 30s...")
-                    time.sleep(30)
+                    logger.warning("Rate limit / ban — astept 3 minute...")
+                    time.sleep(180)
+                    break
                 else:
                     logger.error(f"[{sym}] BinanceError: {e}")
             except Exception as e:
                 logger.error(f"[{sym}] Eroare: {e}")
-            time.sleep(0.35)  # 0.35s = max ~170 req/min, sigur sub limita
+            time.sleep(0.5)
 
         logger.info(
             f"Ciclu complet | {datetime.now(timezone.utc).strftime('%H:%M:%S')} UTC | "
