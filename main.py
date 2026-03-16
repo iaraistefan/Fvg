@@ -173,9 +173,15 @@ class FVGBot:
                 break
             try:
                 self.scan_symbol(sym)
+            except BinanceAPIException as e:
+                if e.code == -1003:
+                    logger.warning("Rate limit atins — astept 30s...")
+                    time.sleep(30)
+                else:
+                    logger.error(f"[{sym}] BinanceError: {e}")
             except Exception as e:
                 logger.error(f"[{sym}] Eroare: {e}")
-            time.sleep(0.25)
+            time.sleep(0.35)  # 0.35s = max ~170 req/min, sigur sub limita
 
         logger.info(
             f"Ciclu complet | {datetime.now(timezone.utc).strftime('%H:%M:%S')} UTC | "
