@@ -18,6 +18,7 @@ from binance.exceptions import BinanceAPIException
 from detector import FVGSetup
 import config
 from config import LEVERAGE, USDT_PER_TRADE
+import journal
 
 logger = logging.getLogger("FVGBot")
 FAPI = "https://fapi.binance.com"
@@ -176,6 +177,18 @@ class OrderManager:
 
                 elif status in ("CANCELED", "EXPIRED", "REJECTED"):
                     logger.info(f"[{symbol}] Ordin {status} — eliminat din pending")
+                    journal.log_trade(
+                        symbol=symbol,
+                        direction=data.get("direction","?"),
+                        entry=data.get("entry",0),
+                        sl=data["sl"], tp=data["tp"],
+                        result="EXPIRED", pnl_usdt=0.0,
+                        usdt_per_trade=USDT_PER_TRADE,
+                        open_time=data.get("open_time",""),
+                        close_time=t.strftime("%Y-%m-%dT%H:%M:%SZ", t.gmtime()),
+                        rsi=data.get("rsi",0.0),
+                        ema_slope=data.get("slope",0.0),
+                    )
                     done.append(symbol)
 
             except Exception as e:
@@ -275,6 +288,11 @@ class OrderManager:
                 "tp":         tp_r,
                 "qty":        qty,
                 "close_side": close_side,
+                "entry":      entry_r,
+                "direction":  side,
+                "open_time":  t.strftime("%Y-%m-%dT%H:%M:%SZ", t.gmtime()),
+                "rsi":        getattr(setup, "rsi", 0.0),
+                "slope":      getattr(setup, "slope_fast", 0.0),
             }
             logger.info(f"[{symbol}] Astept umplerea pentru SL/TP...")
             return True
