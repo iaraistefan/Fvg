@@ -125,21 +125,20 @@ class FVGBot:
     def check_and_send_report(self):
         interval = config.TELEGRAM_REPORT_HOURS * 3600
         if time.time() - self.last_report_time >= interval:
-            active = self.count_active()
-            pending = len(self.om.pending_orders)
+            # Statistici DOAR ale acestui bot
+            bstats = self.om.get_bot_stats()
             stats_data = {
-                "total_trades":    self.stats["total"],
-                "wins":            self.stats["wins"],
-                "losses":          self.stats["losses"],
-                "expired_orders":  0,
-                "pending":         pending,
-                "open_positions":  active,
-                "pnl_total":       self.stats["pnl"],
-                "pnl_today":       0.0,
-                "win_rate":        (self.stats["wins"] / self.stats["total"] * 100
-                                    if self.stats["total"] > 0 else 0),
-                "best_trade":      0.0,
-                "worst_trade":     0.0,
+                "total_trades":    bstats["total"],
+                "wins":            bstats["wins"],
+                "losses":          bstats["losses"],
+                "expired_orders":  bstats["expired"],
+                "pending":         bstats["pending"],
+                "open_positions":  bstats["active"],
+                "pnl_total":       bstats["pnl_total"],
+                "pnl_today":       bstats["pnl_today"],
+                "win_rate":        bstats["win_rate"],
+                "best_trade":      bstats["best"],
+                "worst_trade":     bstats["worst"],
                 "commission_paid": 0.0,
                 "start_time":      self.stats["start"],
             }
@@ -148,7 +147,7 @@ class FVGBot:
             logger.info("Raport Telegram trimis.")
 
     def run_cycle(self):
-        # 1. Verifica ordine umplute + plaseaza SL/TP
+        # 1. Verifica ordine + pozitii active ale botului
         try:
             self.om.check_filled_orders()
         except BinanceAPIException as e:
