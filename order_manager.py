@@ -1,10 +1,15 @@
 """
-Order Manager v5 — urmareste DOAR tradurile acestui bot
+Order Manager v6 — fixes:
+  1. State persistent in JSON (supravietuieste restart-urilor Render)
+  2. Expire orders calcul corect
+  3. income_history cu endTime pentru izolare corecta
 """
 import logging
 import hmac
 import hashlib
 import time as t
+import json
+import os
 import requests as req
 from urllib.parse import urlencode
 from binance.client import Client
@@ -14,7 +19,44 @@ import config
 from config import LEVERAGE, USDT_PER_TRADE
 
 logger = logging.getLogger("FVGBot")
-FAPI = "https://fapi.binance.com"
+FAPI  = "https://fapi.binance.com"
+
+# Fisier de stare — supravietuieste restarturilor
+STATE_FILE = "bot_state.json"
+
+
+def _save_state(pending: dict, active: dict, closed: list):
+    """Salveaza starea botului pe disk."""
+    try:
+        with open(STATE_FILE, "w") as f:
+            json.dump({
+                "pending_orders":  pending,
+                "active_positions": active,
+                "closed_trades":   closed,
+            }, f, indent=2)
+    except Exception as e:
+        logger.error(f"_save_state error: {e}")
+
+
+def _load_state():
+    """Incarca starea botului de pe disk (dupa restart)."""
+    if not os.path.exists(STATE_FILE):
+        return {}, {}, []
+    try:
+        with open(STATE_FILE) as f:
+            data = json.load(f)
+        pending = data.get("pending_orders", {})
+        active  = data.get("active_positions", {})
+        closed  = data.get("closed_trades", [])
+        if pending or active:
+            logger.info(
+                f"State restaurat: {len(pending)} pending, "
+                f"{len(active)} active, {len(closed)} closed"
+            )
+        return pending, active, closed
+    except Exception as e:
+        logger.error(f"_load_state error: {e}")
+        return {}, {}, []
 
 
 class OrderManager:
@@ -22,15 +64,11 @@ class OrderManager:
         self.client = client
         self._precision_cache = {}
 
-        # Ordine LIMIT plasate, asteptand umplere
-        self.pending_orders: dict = {}
+        # Incarca starea de pe disk (dupa restart)
+        self.pending_orders, self.active_positions, self.closed_trades = _load_state()
 
-        # Pozitii ACTIVE (umplute, cu SL/TP)
-        # {symbol: {direction, entry, sl, tp, qty, open_time, open_ts, rsi, slope}}
-        self.active_positions: dict = {}
-
-        # Trade-uri INCHISE ale ACESTUI bot (nu alte boturi/manuale)
-        self.closed_trades: list = []
+    def _save(self):
+        _save_state(self.pending_orders, self.active_positions, self.closed_trades)
 
     # ─────────────────────────────────────────
     #  UTILS
@@ -60,7 +98,7 @@ class OrderManager:
         return round((USDT_PER_TRADE * LEVERAGE) / entry, info["qty_prec"])
 
     def _algo_signed_post(self, params: dict) -> dict:
-        """POST la /fapi/v1/algoOrder cu parametrii in body (data=)."""
+        """POST la /fapi/v1/algoOrder — parametrii in body (data=)."""
         params["timestamp"] = int(t.time() * 1000)
         query_string = urlencode(params)
         signature = hmac.new(
@@ -83,7 +121,7 @@ class OrderManager:
             return {"error": str(e)}
 
     # ─────────────────────────────────────────
-    #  SL / TP PLACEMENT
+    #  SL / TP
     # ─────────────────────────────────────────
 
     def _place_conditional(self, symbol: str, side: str,
@@ -108,16 +146,24 @@ class OrderManager:
         return False
 
     # ─────────────────────────────────────────
-    #  VERIFICA ORDINE PENDING
+    #  CHECK CYCLE
     # ─────────────────────────────────────────
 
     def check_filled_orders(self):
-        self._check_pending()
-        self._check_active_positions()
-        self._expire_old_orders()
+        changed = False
+        changed |= self._check_pending()
+        changed |= self._check_active_positions()
+        changed |= self._expire_old_orders()
+        if changed:
+            self._save()  # salveaza pe disk doar daca ceva s-a schimbat
 
-    def _check_pending(self):
+    def _check_pending(self) -> bool:
+        if not self.pending_orders:
+            return False
+
         to_remove = []
+        changed   = False
+
         for symbol, data in list(self.pending_orders.items()):
             try:
                 order  = self.client.futures_get_order(
@@ -127,13 +173,17 @@ class OrderManager:
 
                 if status == "FILLED":
                     filled_price = float(order.get("avgPrice", data["entry"]))
-                    logger.info(f"[{symbol}] Ordin UMPLUT la {filled_price} — plasez SL + TP...")
+                    logger.info(f"[{symbol}] Ordin UMPLUT la {filled_price}")
                     t.sleep(0.5)
 
                     close_side = data["close_side"]
-                    sl_ok = self._place_conditional(symbol, close_side, "STOP_MARKET",        data["sl"], data["qty"])
+                    sl_ok = self._place_conditional(
+                        symbol, close_side, "STOP_MARKET", data["sl"], data["qty"]
+                    )
                     t.sleep(0.3)
-                    tp_ok = self._place_conditional(symbol, close_side, "TAKE_PROFIT_MARKET", data["tp"], data["qty"])
+                    tp_ok = self._place_conditional(
+                        symbol, close_side, "TAKE_PROFIT_MARKET", data["tp"], data["qty"]
+                    )
 
                     if sl_ok and tp_ok:
                         logger.info(f"[{symbol}] SL + TP plasate cu succes!")
@@ -142,7 +192,7 @@ class OrderManager:
                     elif not tp_ok:
                         logger.warning(f"[{symbol}] TP a esuat!")
 
-                    # Muta in active_positions pentru tracking
+                    # Muta in active_positions
                     self.active_positions[symbol] = {
                         "direction": data.get("direction", "?"),
                         "entry":     filled_price,
@@ -155,10 +205,10 @@ class OrderManager:
                         "slope":     data.get("slope", 0.0),
                     }
                     to_remove.append(symbol)
+                    changed = True
 
                 elif status in ("CANCELED", "EXPIRED", "REJECTED"):
                     logger.info(f"[{symbol}] Ordin {status}")
-                    # Log ordin expirat
                     self.closed_trades.append({
                         "symbol":     symbol,
                         "direction":  data.get("direction", "?"),
@@ -171,6 +221,7 @@ class OrderManager:
                         "close_time": t.strftime("%Y-%m-%dT%H:%M:%SZ", t.gmtime()),
                     })
                     to_remove.append(symbol)
+                    changed = True
 
             except Exception as e:
                 logger.error(f"[{symbol}] check_pending error: {e}")
@@ -178,13 +229,12 @@ class OrderManager:
         for sym in to_remove:
             self.pending_orders.pop(sym, None)
 
-    def _check_active_positions(self):
-        """
-        Verifica daca pozitiile ACESTUI BOT au fost inchise.
-        Citeste PNL real din Binance doar pentru simbolurile pe care botul le-a deschis.
-        """
+        return changed
+
+    def _check_active_positions(self) -> bool:
+        """Verifica pozitiile active ale botului — izolat de alte boturi."""
         if not self.active_positions:
-            return
+            return False
 
         try:
             real_positions = self.client.futures_position_information()
@@ -194,33 +244,46 @@ class OrderManager:
             }
         except Exception as e:
             logger.error(f"_check_active_positions error: {e}")
-            return
+            return False
 
         to_close = []
+        changed  = False
+
         for symbol, pos in list(self.active_positions.items()):
             if symbol in real_open:
                 continue  # pozitia inca e deschisa
 
-            # Pozitia s-a inchis — citeste PNL real din Binance
+            # Pozitia s-a inchis — citeste PNL din Binance
             try:
+                open_ts  = int(pos["open_ts"])
+                # FIX BUG 3: endTime = acum, pentru a nu lua income din alte sesiuni
+                end_ts   = int(t.time() * 1000)
+
                 income = self.client.futures_income_history(
                     symbol     = symbol,
                     incomeType = "REALIZED_PNL",
-                    startTime  = pos["open_ts"],
-                    limit      = 10
+                    startTime  = open_ts,
+                    endTime    = end_ts,
+                    limit      = 20
                 )
                 pnl = sum(float(x["income"]) for x in income) if income else 0.0
-                result = "TP" if pnl > 0 else "SL"
-                close_time = t.strftime("%Y-%m-%dT%H:%M:%SZ", t.gmtime())
 
-                sign = "+" if pnl >= 0 else ""
+                # Daca PNL = 0 si pozitia nu mai e in cont, probabil e o eroare temporara
+                # Asteptam urmatorul ciclu
+                if pnl == 0.0 and not income:
+                    logger.warning(f"[{symbol}] Pozitia inchisa dar PNL = 0, verific din nou...")
+                    continue
+
+                result     = "TP" if pnl > 0 else "SL"
+                close_time = t.strftime("%Y-%m-%dT%H:%M:%SZ", t.gmtime())
+                sign       = "+" if pnl >= 0 else ""
+
                 logger.info(
                     f"[{symbol}] {'✅ TP' if result == 'TP' else '❌ SL'} | "
                     f"PNL real: {sign}{pnl:.4f} USDT"
                 )
 
-                # Salveaza in lista botului
-                self.closed_trades.append({
+                trade_record = {
                     "symbol":     symbol,
                     "direction":  pos["direction"],
                     "entry":      pos["entry"],
@@ -232,9 +295,10 @@ class OrderManager:
                     "close_time": close_time,
                     "rsi":        pos.get("rsi", 0),
                     "slope":      pos.get("slope", 0),
-                })
+                }
+                self.closed_trades.append(trade_record)
 
-                # Salveaza si in jurnal CSV
+                # Salveaza in jurnal CSV
                 try:
                     import journal
                     journal.log_trade(
@@ -249,6 +313,7 @@ class OrderManager:
                     pass
 
                 to_close.append(symbol)
+                changed = True
 
             except Exception as e:
                 logger.error(f"[{symbol}] get PNL error: {e}")
@@ -256,30 +321,53 @@ class OrderManager:
         for sym in to_close:
             self.active_positions.pop(sym, None)
 
-    def _expire_old_orders(self):
-        expiry_sec = config.ORDER_EXPIRY_HOURS * 3600
-        now        = t.time()
-        to_expire  = []
+        return changed
+
+    def _expire_old_orders(self) -> bool:
+        """FIX BUG 2: calcul corect al timpului de expirare."""
+        expiry_ms = config.ORDER_EXPIRY_HOURS * 3600 * 1000  # in milisecunde
+        now_ms    = int(t.time() * 1000)
+        to_expire = []
+        changed   = False
+
         for symbol, order_info in list(self.pending_orders.items()):
-            if now - order_info.get("open_ts", now * 1000) / 1000 >= expiry_sec:
-                logger.info(f"[{symbol}] Ordin expirat — anulez...")
+            open_ts = order_info.get("open_ts", now_ms)
+            age_ms  = now_ms - open_ts  # ambele in milisecunde acum
+
+            if age_ms >= expiry_ms:
+                age_h = age_ms / 3600000
+                logger.info(f"[{symbol}] Ordin expirat dupa {age_h:.1f}h — anulez...")
                 try:
                     self.client.futures_cancel_order(
                         symbol=symbol, orderId=order_info["order_id"]
                     )
+                    self.closed_trades.append({
+                        "symbol":     symbol,
+                        "direction":  order_info.get("direction", "?"),
+                        "entry":      order_info.get("entry", 0),
+                        "sl":         order_info["sl"],
+                        "tp":         order_info["tp"],
+                        "result":     "EXPIRED",
+                        "pnl":        0.0,
+                        "open_time":  order_info.get("open_time", ""),
+                        "close_time": t.strftime("%Y-%m-%dT%H:%M:%SZ", t.gmtime()),
+                    })
+                    changed = True
                 except Exception as e:
                     logger.error(f"[{symbol}] Cancel error: {e}")
                 to_expire.append(symbol)
+
         for sym in to_expire:
             self.pending_orders.pop(sym, None)
+
+        return changed
 
     # ─────────────────────────────────────────
     #  STATISTICI DOAR PENTRU ACEST BOT
     # ─────────────────────────────────────────
 
     def get_bot_stats(self) -> dict:
-        """Returneaza statistici EXCLUSIV pentru trade-urile acestui bot."""
-        closed = [x for x in self.closed_trades if x["result"] in ("TP", "SL")]
+        closed  = [x for x in self.closed_trades if x["result"] in ("TP", "SL")]
         expired = [x for x in self.closed_trades if x["result"] == "EXPIRED"]
 
         if not closed:
@@ -287,7 +375,7 @@ class OrderManager:
                 "total": 0, "wins": 0, "losses": 0, "expired": len(expired),
                 "pnl_total": 0.0, "pnl_today": 0.0,
                 "win_rate": 0.0, "best": 0.0, "worst": 0.0,
-                "active": len(self.active_positions),
+                "active":  len(self.active_positions),
                 "pending": len(self.pending_orders),
             }
 
@@ -297,8 +385,10 @@ class OrderManager:
         wr     = len(wins) / len(closed) * 100
 
         today_str = t.strftime("%Y-%m-%d", t.gmtime())
-        pnl_today = sum(x["pnl"] for x in closed
-                       if x.get("close_time", "")[:10] == today_str)
+        pnl_today = sum(
+            x["pnl"] for x in closed
+            if x.get("close_time", "")[:10] == today_str
+        )
 
         return {
             "total":     len(closed),
@@ -315,7 +405,7 @@ class OrderManager:
         }
 
     # ─────────────────────────────────────────
-    #  LEVERAGE & TRADE PLACEMENT
+    #  PLASARE TRADE
     # ─────────────────────────────────────────
 
     def set_leverage(self, symbol: str):
@@ -350,14 +440,14 @@ class OrderManager:
 
             side       = "BUY"  if setup.direction == "BULL" else "SELL"
             close_side = "SELL" if setup.direction == "BULL" else "BUY"
+            open_ts    = int(t.time() * 1000)
+            open_time  = t.strftime("%Y-%m-%dT%H:%M:%SZ", t.gmtime())
 
             order = self.client.futures_create_order(
                 symbol=symbol, side=side, type="LIMIT",
                 timeInForce="GTC", quantity=qty, price=entry_r,
             )
-            order_id    = order["orderId"]
-            open_ts     = int(t.time() * 1000)
-            open_time   = t.strftime("%Y-%m-%dT%H:%M:%SZ", t.gmtime())
+            order_id = order["orderId"]
 
             logger.info(
                 f"[{symbol}] LIMIT {side} plasat | orderId={order_id} | "
@@ -377,6 +467,7 @@ class OrderManager:
                 "rsi":        getattr(setup, "rsi", 0.0),
                 "slope":      getattr(setup, "slope_fast", 0.0),
             }
+            self._save()  # salveaza imediat
             return True
 
         except BinanceAPIException as e:
@@ -390,7 +481,7 @@ class OrderManager:
             return False
 
     # ─────────────────────────────────────────
-    #  UTILITARE COMPATIBILITATE
+    #  UTILITARE
     # ─────────────────────────────────────────
 
     def get_open_positions(self) -> list:
