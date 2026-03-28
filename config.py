@@ -27,7 +27,7 @@ EMA_PARALLEL_MAX = 4.0
 MAX_CONSEC_AGGR  = 1
 
 SCAN_INTERVAL_SEC  = 60
-MAX_OPEN_TRADES    = 15
+MAX_OPEN_TRADES    = 25
 ORDER_EXPIRY_HOURS = 8
 
 # 1000WHYUSDT adaugat — da erori repetate la plasare ordin
