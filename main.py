@@ -199,6 +199,9 @@ class FVGBot:
         self.check_and_send_report()
 
     def run(self):
+        # Reconciliaza cu Binance la startup (recupereaza pozitii dupa restart)
+        logger.info("Reconciliere cu Binance...")
+        self.om.reconcile_with_binance()
         logger.info("Bot pornit. Ctrl+C pentru oprire.")
         while True:
             try:
