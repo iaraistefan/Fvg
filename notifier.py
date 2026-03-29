@@ -98,84 +98,56 @@ def notify_error(context: str, error: str):
 
 def send_statistics_report(stats: dict):
     """
-    Raport complet la fiecare 4 ore.
-    stats = {
-        total_trades, wins, losses, pending,
-        open_positions, pnl_total, pnl_today,
-        win_rate, best_trade, worst_trade,
-        commission_paid, start_time
-    }
+    Raport complet cu date reale din Binance.
     """
-    total    = stats.get("total_trades", 0)
-    wins     = stats.get("wins", 0)
-    losses   = stats.get("losses", 0)
-    pending  = stats.get("pending", 0)
-    open_pos = stats.get("open_positions", 0)
-    pnl      = stats.get("pnl_total", 0.0)
-    pnl_today= stats.get("pnl_today", 0.0)
-    wr       = stats.get("win_rate", 0.0)
-    best     = stats.get("best_trade", 0.0)
-    worst    = stats.get("worst_trade", 0.0)
-    comm     = stats.get("commission_paid", 0.0)
-    started  = stats.get("start_time", "?")
-    expired  = stats.get("expired_orders", 0)
+    # Conversie explicita - valorile din JSON pot fi strings
+    total    = int(stats.get("total_trades", 0) or 0)
+    wins     = int(stats.get("wins", 0) or 0)
+    losses   = int(stats.get("losses", 0) or 0)
+    pending  = int(stats.get("pending", 0) or 0)
+    open_pos = int(stats.get("open_positions", 0) or 0)
+    pnl      = float(stats.get("pnl_total", 0.0) or 0.0)
+    pnl_today= float(stats.get("pnl_today", 0.0) or 0.0)
+    wr       = float(stats.get("win_rate", 0.0) or 0.0)
+    best     = float(stats.get("best_trade", 0.0) or 0.0)
+    worst    = float(stats.get("worst_trade", 0.0) or 0.0)
+    comm     = float(stats.get("commission_paid", 0.0) or 0.0)
+    started  = str(stats.get("start_time", "?"))
 
     pnl_sign       = "+" if pnl >= 0 else ""
     pnl_today_sign = "+" if pnl_today >= 0 else ""
     pnl_emoji      = "📈" if pnl >= 0 else "📉"
     wr_emoji       = "🔥" if wr >= 65 else ("✅" if wr >= 50 else "⚠️")
-
     now = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
 
-    # Citeste statistici din jurnal
-    j = {}
-    if _journal:
-        try:
-            j = _journal.get_stats()
-        except Exception:
-            j = {}
-
-    j_total   = j.get("total", total)
-    j_wins    = j.get("wins",  wins)
-    j_losses  = j.get("losses", losses)
-    j_expired = j.get("expired", expired)
-    j_pnl     = j.get("pnl_total", pnl)
-    j_wr      = j.get("win_rate", wr)
-    j_best    = j.get("best", best)
-    j_worst   = j.get("worst", worst)
-    j_wr_emoji = "🔥" if j_wr >= 65 else ("✅" if j_wr >= 50 else "⚠️")
-    j_pnl_sign = "+" if j_pnl >= 0 else ""
-    j_pnl_emoji = "📈" if j_pnl >= 0 else "📉"
-
-    # Top simboluri
-    top_sym_text = ""
-    for sym, spnl in j.get("top_symbols", []):
-        sign = "+" if spnl >= 0 else ""
-        top_sym_text += f"  • {sym}: {sign}{spnl:.2f} USDT\n"
-
-    # Ore cele mai bune
-    best_h_text = ""
-    for h, hwr in j.get("best_hours", []):
-        best_h_text += f"  • {h:02d}:00 UTC → {hwr:.0f}% WR\n"
+    if total == 0:
+        trades_line = "Niciun trade inchis inca"
+    else:
+        trades_line = f"{wr_emoji} Win Rate: <b>{wr:.1f}%</b> ({wins}✅ / {losses}❌)"
 
     msg = (
         f"<b>📊 RAPORT BOT FVG — {now}</b>\n"
         f"━━━━━━━━━━━━━━━━━━━━\n"
-        f"<b>STATISTICI REALE (jurnal live)</b>\n"
-        f"Trade-uri totale: <b>{j_total}</b>\n"
-        f"{j_wr_emoji} Win Rate: <b>{j_wr:.1f}%</b> ({j_wins}✅ / {j_losses}❌ / {j_expired}⏰)\n"
-        f"{j_pnl_emoji} PNL Total: <b>{j_pnl_sign}{j_pnl:.4f} USDT</b>\n"
-        f"Best: +{j_best:.4f} | Worst: {j_worst:.4f}\n"
+        f"<b>REZULTATE REALE (Binance)</b>\n"
+        f"Trade-uri inchise: <b>{total}</b>\n"
+        f"{trades_line}\n"
+        f"{pnl_emoji} PNL Total: <b>{pnl_sign}{pnl:.4f} USDT</b>\n"
+        f"   Ultimele 24h: <b>{pnl_today_sign}{pnl_today:.4f} USDT</b>\n"
+        f"   Comisioane: -{comm:.4f} USDT\n"
+    )
+
+    if total > 0:
+        msg += (
+            f"   Cel mai bun: <b>+{best:.4f} USDT</b>\n"
+            f"   Cel mai prost: <b>{worst:.4f} USDT</b>\n"
+        )
+
+    msg += (
         f"━━━━━━━━━━━━━━━━━━━━\n"
         f"<b>SITUATIE CURENTA</b>\n"
         f"Pozitii deschise: <b>{open_pos}</b> / {config.MAX_OPEN_TRADES}\n"
         f"Ordine pending:   <b>{pending}</b>\n"
-        f"De la: {started}\n"
+        f"Bot activ de la: {started}"
     )
-    if top_sym_text:
-        msg += f"━━━━━━━━━━━━━━━━━━━━\n<b>TOP SIMBOLURI</b>\n{top_sym_text}"
-    if best_h_text:
-        msg += f"<b>CELE MAI BUNE ORE</b>\n{best_h_text}"
-    msg += f"━━━━━━━━━━━━━━━━━━━━"
-    
+
     _send(msg)
