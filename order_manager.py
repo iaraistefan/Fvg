@@ -13,6 +13,10 @@ from binance.exceptions import BinanceAPIException
 from detector import FVGSetup
 import config
 from config import LEVERAGE, USDT_PER_TRADE
+try:
+    from notifier import notify_trade_closed as _notify_closed
+except ImportError:
+    _notify_closed = None
 
 logger = logging.getLogger("FVGBot")
 FAPI       = "https://fapi.binance.com"
@@ -267,13 +271,36 @@ class OrderManager:
                 close_time = t.strftime("%Y-%m-%dT%H:%M:%SZ", t.gmtime())
                 sign = "+" if pnl >= 0 else ""
                 logger.info(f"[{symbol}] {'✅ TP' if result=='TP' else '❌ SL'} | PNL real: {sign}{pnl:.4f} USDT")
-                self.closed_trades.append({
+                trade_record = {
                     "symbol": symbol, "direction": pos["direction"],
                     "entry": pos["entry"], "sl": pos["sl"], "tp": pos["tp"],
                     "result": result, "pnl": round(pnl,4),
                     "open_time": pos["open_time"], "close_time": close_time,
                     "rsi": pos.get("rsi",0), "slope": pos.get("slope",0),
-                })
+                }
+                self.closed_trades.append(trade_record)
+
+                # Notificare Telegram (jurnal permanent)
+                try:
+                    if _notify_closed:
+                        open_ts  = pos.get("open_ts", int(t.time()*1000))
+                        dur_h    = (int(t.time()*1000) - open_ts) / 3600000
+                        _notify_closed(
+                            symbol     = symbol,
+                            direction  = pos["direction"],
+                            entry      = pos["entry"],
+                            sl         = pos["sl"],
+                            tp         = pos["tp"],
+                            result     = result,
+                            pnl_usdt   = pnl,
+                            open_time  = pos["open_time"],
+                            close_time = close_time,
+                            rsi        = pos.get("rsi", 0.0),
+                            duration_h = dur_h,
+                        )
+                except Exception as e:
+                    logger.warning(f"[{symbol}] notify_closed error: {e}")
+
                 try:
                     import journal
                     journal.log_trade(
