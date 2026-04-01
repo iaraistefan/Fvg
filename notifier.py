@@ -96,6 +96,55 @@ def notify_error(context: str, error: str):
     _send(f"🔥 <b>EROARE BOT</b>\n{context}\n<code>{error[:200]}</code>")
 
 
+def notify_trade_closed(symbol: str, direction: str, entry: float,
+                        sl: float, tp: float, result: str,
+                        pnl_usdt: float, open_time: str, close_time: str,
+                        rsi: float = 0.0, duration_h: float = 0.0):
+    """
+    Trimite notificare Telegram la fiecare trade inchis.
+    Acesta e jurnalul permanent — istoricul raman in chat.
+    """
+    if result == "TP":
+        emoji  = "✅"
+        r_text = "TAKE PROFIT"
+        sign   = "+"
+    elif result == "SL":
+        emoji  = "❌"
+        r_text = "STOP LOSS"
+        sign   = ""
+    else:
+        emoji  = "⏰"
+        r_text = "TIMEOUT"
+        sign   = "+" if pnl_usdt >= 0 else ""
+
+    dir_emoji = "🟢 LONG" if direction in ("BUY","LONG") else "🔴 SHORT"
+    pnl_color = "📈" if pnl_usdt >= 0 else "📉"
+
+    # Calculeaza RR realizat
+    risk  = abs(entry - sl)
+    rw    = abs(entry - tp)
+    rr    = round(rw / risk, 2) if risk > 0 else 0
+
+    msg = (
+        f"{emoji} <b>TRADE INCHIS — {symbol}</b>\n"
+        f"━━━━━━━━━━━━━━━━━━━━\n"
+        f"Rezultat:  <b>{r_text}</b>\n"
+        f"Directie:  {dir_emoji}\n"
+        f"Entry:     <code>{entry:.6f}</code>\n"
+        f"SL:        <code>{sl:.6f}</code>\n"
+        f"TP:        <code>{tp:.6f}</code>\n"
+        f"━━━━━━━━━━━━━━━━━━━━\n"
+        f"{pnl_color} PNL:  <b>{sign}{pnl_usdt:.4f} USDT</b>\n"
+        f"⏱ Durata: <b>{duration_h:.1f}h</b>\n"
+        f"📊 RSI entry: {rsi:.1f}\n"
+        f"🎯 RR: 1:{rr}\n"
+        f"━━━━━━━━━━━━━━━━━━━━\n"
+        f"<i>Deschis:  {open_time[:16].replace('T',' ')} UTC</i>\n"
+        f"<i>Inchis:   {close_time[:16].replace('T',' ')} UTC</i>"
+    )
+    _send(msg)
+
+
 def send_statistics_report(stats: dict):
     """
     Raport complet cu date reale din Binance.
