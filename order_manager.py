@@ -93,8 +93,33 @@ class PositionGuardian:
         replased = 0
 
         for symbol, pos in list(active_positions.items()):
+            if symbol in real_open:
+                # Emergency close daca pierderea depaseste limita
+                try:
+                    real_p = real_open[symbol]
+                    entry  = float(pos.get("entry", 0))
+                    mark   = float(real_p.get("markPrice") or entry)
+                    direct = pos.get("direction","BUY")
+                    if entry > 0 and mark > 0:
+                        loss_pct = (mark-entry)/entry*100 if direct=="BUY" else (entry-mark)/entry*100
+                        max_loss = -getattr(config,"MAX_LOSS_PCT_EMERGENCY",0.30)*100
+                        if loss_pct < max_loss:
+                            logger.error(f"[EMERGENCY] {symbol} pierde {loss_pct:.1f}% — INCHID MARKET!")
+                            qty = abs(float(real_p.get("positionAmt",0) or pos.get("qty",0)))
+                            cs  = "SELL" if direct=="BUY" else "BUY"
+                            try:
+                                self.client.futures_create_order(
+                                    symbol=symbol,side=cs,type="MARKET",quantity=qty,reduceOnly=True
+                                )
+                                logger.info(f"[EMERGENCY] {symbol} inchis market!")
+                            except Exception as ce:
+                                logger.error(f"[EMERGENCY] close error: {ce}")
+                except Exception as ee:
+                    logger.error(f"[EMERGENCY] check error {symbol}: {ee}")
+                continue  # pozitia inca e deschisa
+
             if symbol not in real_open:
-                continue  # pozitia nu mai e deschisa
+                pass  # pozitia nu mai e deschisa — continua mai jos
 
             real_pos   = real_open[symbol]
             pos_amt    = float(real_pos["positionAmt"])
