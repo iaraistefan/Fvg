@@ -53,15 +53,17 @@ class FVGBot:
     def get_symbols(self) -> list:
         try:
             info = self.client.futures_exchange_info()
-            return [
+            syms = [
                 s["symbol"] for s in info["symbols"]
                 if s["symbol"].endswith("USDT")
                 and s["status"] == "TRADING"
                 and s["symbol"] not in config.BLACKLIST
             ]
+            self._symbols_cache = syms
+            return syms
         except Exception as e:
             logger.error(f"get_symbols error: {e}")
-            return []
+            return getattr(self, "_symbols_cache", [])
 
     def get_klines(self, symbol: str) -> list:
         try:
