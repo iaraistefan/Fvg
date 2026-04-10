@@ -42,3 +42,18 @@ TELEGRAM_CHAT_ID      = os.environ.get("TELEGRAM_CHAT_ID", "")
 TELEGRAM_REPORT_HOURS = 4
 
 LOG_FILE = "fvg_bot.log"
+
+# ─── FILTRE SIGURANTA ──────────────────────────────────────
+# Volum minim 24h — evita simboluri micro-cap manipulabile
+
+# Emergency close — inchide automat daca pierdere > 30%
+# si SL nu s-a executat (slippage extrem pe micro-cap)
+MAX_LOSS_PCT_EMERGENCY = 0.30      # 30% din notional
+
+# Blacklist extins cu simboluri problematice confirmate
+BLACKLIST = [
+    "BTCDOMUSDT", "DEFIUSDT", "XPDUSDT",
+    "1000WHYUSDT", "USDCUSDT", "INTCUSDT",
+    "PARTIUSDT", "TNSRUSDT", "DYMUSDT",
+    "HIPPOUSDT", "CROSSUSDT",
+]
