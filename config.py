@@ -27,7 +27,7 @@ EMA_PARALLEL_MAX = 4.0
 MAX_CONSEC_AGGR  = 1
 
 SCAN_INTERVAL_SEC  = 60
-MAX_OPEN_TRADES    = 25
+MAX_OPEN_TRADES    = 15
 ORDER_EXPIRY_HOURS = 8
 
 # 1000WHYUSDT adaugat — da erori repetate la plasare ordin
@@ -48,7 +48,7 @@ LOG_FILE = "fvg_bot.log"
 
 # Emergency close — inchide automat daca pierdere > 30%
 # si SL nu s-a executat (slippage extrem pe micro-cap)
-MAX_LOSS_PCT_EMERGENCY = 0.30      # 30% din notional
+# MAX_LOSS_PCT_EMERGENCY = 0.30  # eliminat      # 30% din notional
 
 # Blacklist extins cu simboluri problematice confirmate
 BLACKLIST = [
@@ -57,3 +57,5 @@ BLACKLIST = [
     "PARTIUSDT", "TNSRUSDT", "DYMUSDT",
     "HIPPOUSDT", "CROSSUSDT",
 ]
+
+DAILY_LOSS_LIMIT_PCT = 0.20   # 20% din capital/zi
