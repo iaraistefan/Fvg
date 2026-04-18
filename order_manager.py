@@ -20,6 +20,8 @@ except ImportError:
 
 
 
+logger = logging.getLogger("FVGBot")
+
 def _save_state(pending, active, closed):
     """Salveaza starea botului in JSON persistent."""
     try:
