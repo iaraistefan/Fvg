@@ -1,4 +1,4 @@
- """
+"""
 FVG WITH-TREND BOT v3 — versiune stabila
 """
 import sys
