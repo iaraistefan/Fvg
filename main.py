@@ -1,4 +1,4 @@
-"""
+ """
 FVG WITH-TREND BOT v3 — versiune stabila
 """
 import sys
@@ -51,6 +51,11 @@ class FVGBot:
         logger.info("═══════════════════════════════════════════════════════")
 
     def get_symbols(self) -> list:
+        # Cache 15 minute — reduce API calls, evita IP ban
+        now_ts = time.time()
+        if (hasattr(self,"_symbols_cache") and self._symbols_cache
+                and now_ts - getattr(self,"_symbols_ts",0) < 900):
+            return self._symbols_cache
         try:
             info = self.client.futures_exchange_info()
             syms = [
@@ -60,9 +65,15 @@ class FVGBot:
                 and s["symbol"] not in config.BLACKLIST
             ]
             self._symbols_cache = syms
+            self._symbols_ts    = now_ts
+            logger.info(f"Simboluri actualizate: {len(syms)}")
             return syms
         except Exception as e:
-            logger.error(f"get_symbols error: {e}")
+            if "-1003" in str(e):
+                logger.warning("Rate limit get_symbols — folosesc cache")
+                time.sleep(30)
+            else:
+                logger.error(f"get_symbols error: {e}")
             return getattr(self, "_symbols_cache", [])
 
     def get_klines(self, symbol: str) -> list:
