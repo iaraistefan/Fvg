@@ -53,9 +53,13 @@ class FVGBot:
     def get_symbols(self) -> list:
         # Cache 15 minute — reduce API calls, evita IP ban
         now_ts = time.time()
-        if (hasattr(self,"_symbols_cache") and self._symbols_cache
-                and now_ts - getattr(self,"_symbols_ts",0) < 900):
-            return self._symbols_cache
+        cache  = getattr(self,"_symbols_cache",[])
+        cache_age = now_ts - getattr(self,"_symbols_ts",0)
+
+        # Returneaza cache daca e valid si nu e gol
+        if cache and cache_age < 900:
+            return cache
+
         try:
             info = self.client.futures_exchange_info()
             syms = [
@@ -68,13 +72,28 @@ class FVGBot:
             self._symbols_ts    = now_ts
             logger.info(f"Simboluri actualizate: {len(syms)}")
             return syms
-        except Exception as e:
-            if "-1003" in str(e):
-                logger.warning("Rate limit get_symbols — folosesc cache")
-                time.sleep(30)
+        except BinanceAPIException as e:
+            if e.code == -1003:
+                logger.warning(f"Rate limit get_symbols — astept 60s...")
+                time.sleep(60)
+                # Retry o singura data
+                try:
+                    info = self.client.futures_exchange_info()
+                    syms = [s["symbol"] for s in info["symbols"]
+                            if s["symbol"].endswith("USDT")
+                            and s["status"]=="TRADING"
+                            and s["symbol"] not in config.BLACKLIST]
+                    self._symbols_cache = syms
+                    self._symbols_ts    = time.time()
+                    return syms
+                except Exception:
+                    return cache  # returneaza ce avem
             else:
                 logger.error(f"get_symbols error: {e}")
-            return getattr(self, "_symbols_cache", [])
+                return cache
+        except Exception as e:
+            logger.error(f"get_symbols error: {e}")
+            return cache
 
     def get_klines(self, symbol: str) -> list:
         try:
