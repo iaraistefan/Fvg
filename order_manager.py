@@ -5,6 +5,7 @@ Fix-uri aplicate:
   2. SL/TP replasate dupa reconciliere (pozitii cu sl=0 sau tp=0)
   3. Handler -1003 in _check_pending
   4. MARK_PRICE + quantity + reduceOnly=True + GTC pentru SL/TP
+  5. Micro-pauze adaugate in bucle pentru compatibilitate Multi-Bot (evitare Rate Limit -1003 pe Render)
 """
 import logging, json, os
 import time as t
@@ -92,6 +93,9 @@ class OrderManager:
                             tp_p = sp
                 except Exception:
                     pass
+                
+                # PROTECȚIE RATE LIMIT
+                t.sleep(0.2) 
 
                 # FIX: open_ts = acum - 24h (nu -1h!)
                 self.active_positions[symbol] = {
@@ -198,6 +202,9 @@ class OrderManager:
                 logger.info(f"[RECONCILE-FIX] {symbol} SL+TP plasate ✅")
             else:
                 logger.warning(f"[RECONCILE-FIX] {symbol} SL/TP partial esuat — Guardian protejeaza")
+                
+            # PROTECȚIE RATE LIMIT
+            t.sleep(0.2)
 
         self._save()
 
@@ -343,6 +350,10 @@ class OrderManager:
             try:
                 order  = self.client.futures_get_order(symbol=symbol, orderId=data["order_id"])
                 status = order.get("status", "")
+                
+                # PROTECȚIE RATE LIMIT
+                t.sleep(0.2)
+                
             except BinanceAPIException as e:
                 if e.code == -1003:
                     logger.warning(f"[{symbol}] check status rate limit — skip")
@@ -417,10 +428,16 @@ class OrderManager:
             try:
                 open_ts = int(pos["open_ts"])
                 end_ts  = int(t.time() * 1000)
+                
+                # API Call cu "greutate" mare (30 Weight)
                 income  = self.client.futures_income_history(
                     symbol=symbol, incomeType="REALIZED_PNL",
                     startTime=open_ts, endTime=end_ts, limit=20
                 )
+                
+                # PROTECȚIE CRITICĂ RATE LIMIT
+                t.sleep(0.5) 
+                
                 pnl = sum(float(x["income"]) for x in income) if income else 0.0
                 if pnl == 0.0 and not income:
                     logger.warning(f"[{symbol}] PNL=0 — retry urmator ciclu")
@@ -483,6 +500,10 @@ class OrderManager:
                 logger.info(f"[{symbol}] Expirat dupa {age_h:.1f}h — anulez...")
                 try:
                     self.client.futures_cancel_order(symbol=symbol, orderId=oi["order_id"])
+                    
+                    # PROTECȚIE RATE LIMIT
+                    t.sleep(0.2)
+                    
                     self.closed_trades.append({
                         "symbol": symbol, "direction": oi.get("direction","?"),
                         "entry": oi.get("entry",0), "sl": oi["sl"], "tp": oi["tp"],
