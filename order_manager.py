@@ -368,6 +368,11 @@ class OrderManager:
         try:
             real_open = {p["symbol"] for p in self.client.futures_position_information()
                          if abs(float(p["positionAmt"])) > 0}
+        except BinanceAPIException as e:
+            if e.code == -1003:
+                logger.warning("_check_active: rate limit — skip acest ciclu")
+                return False  # nu spam, asteapta urmatorul ciclu de 10s
+            logger.error(f"_check_active error: {e}"); return False
         except Exception as e:
             logger.error(f"_check_active error: {e}"); return False
 
