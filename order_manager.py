@@ -4,7 +4,7 @@ Fix-uri aplicate:
   1. open_ts = acum - 24h (nu -1h) → income_history gaseste PNL corect
   2. SL/TP replasate dupa reconciliere (pozitii cu sl=0 sau tp=0)
   3. Handler -1003 in _check_pending
-  4. MARK_PRICE + closePosition=True + GTC pentru SL/TP
+  4. MARK_PRICE + quantity + reduceOnly=True + GTC pentru SL/TP
 """
 import logging, json, os
 import time as t
@@ -233,7 +233,7 @@ class OrderManager:
     def _place_sl_tp(self, symbol, side, order_type, trigger_price, qty) -> bool:
         """
         MARK_PRICE: trigger pe Mark Price = acelasi ca ROI afisat in app
-        closePosition=True: inchide toata pozitia, fara desync qty
+        quantity+reduceOnly=True: standard endpoint (fara -4120)
         GTC: evita eroarea -4129 (GTE_GTC e legacy)
         """
         label = "SL" if "STOP" in order_type else "TP"
@@ -243,9 +243,10 @@ class OrderManager:
                 side          = side,
                 type          = order_type,
                 stopPrice     = str(trigger_price),
-                closePosition = True,
-                workingType   = "MARK_PRICE",
-                timeInForce   = "GTC",
+                quantity    = str(qty),
+                reduceOnly  = True,
+                workingType = "MARK_PRICE",
+                timeInForce = "GTC",
             )
             logger.info(f"[{symbol}] {label} @ {trigger_price} | id={order.get('orderId','?')} | MARK_PRICE")
             return True
@@ -272,13 +273,26 @@ class OrderManager:
                                              info.get("price_prec", 4))
                     self.client.futures_create_order(
                         symbol=symbol, side=side, type=order_type,
-                        stopPrice=str(tp_r), closePosition=True,
-                        workingType="MARK_PRICE", timeInForce="GTC",
+                        stopPrice=str(tp_r), quantity=str(qty),
+                        reduceOnly=True, workingType="MARK_PRICE", timeInForce="GTC",
                     )
                     logger.info(f"[{symbol}] {label} retry @ {tp_r} ✅")
                     return True
                 except Exception as re:
                     logger.error(f"[{symbol}] {label} retry esuat: {re}")
+                    return False
+            elif e.code == -4120:
+                logger.warning(f"[{symbol}] {label} -4120 — retry fara MARK_PRICE...")
+                try:
+                    order = self.client.futures_create_order(
+                        symbol=symbol, side=side, type=order_type,
+                        stopPrice=str(trigger_price), quantity=str(qty),
+                        reduceOnly=True, timeInForce="GTC",
+                    )
+                    logger.info(f"[{symbol}] {label} plasat (CONTRACT_PRICE fallback) ✅")
+                    return True
+                except Exception as fe:
+                    logger.error(f"[{symbol}] {label} fallback esuat: {fe}")
                     return False
             else:
                 logger.error(f"[{symbol}] {label} error {e.code}: {e.message}")
