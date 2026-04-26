@@ -4,6 +4,7 @@ Fix-uri aplicate:
   1. Double-loop: CHECK la 10s + SCAN la 60s
   2. last_candle_ts setat indiferent de rezultatul plasarii
   3. Offset 30s la startup fata de botul 1H
+  4. Ajustare Rate-Limit pentru IP partajat (Render)
 """
 import sys, io, time, logging
 from datetime import datetime, timezone
@@ -190,7 +191,7 @@ class FVGBot:
 
         PENDING_INTERVAL = 30   # verifica ordine umplute la 30s (reduce rate limit)
         ACTIVE_INTERVAL  = 60   # verifica pozitii inchise la 60s
-        SCAN_INTERVAL    = 90   # scaneaza simboluri la fiecare 60s
+        SCAN_INTERVAL    = 90   # scaneaza simboluri la fiecare 90s
 
         last_pending = 0
         last_active  = 0
@@ -200,7 +201,7 @@ class FVGBot:
             try:
                 now = time.time()
 
-                # ── PENDING CHECK (10s) ───────────────────────
+                # ── PENDING CHECK (30s) ───────────────────────
                 if now - last_pending >= PENDING_INTERVAL:
                     try:
                         c1 = self.om._check_pending()
@@ -216,7 +217,7 @@ class FVGBot:
                         logger.error(f"Pending check error: {e}")
                     last_pending = time.time()
 
-                # ── ACTIVE CHECK (30s) ────────────────────────
+                # ── ACTIVE CHECK (60s) ────────────────────────
                 if now - last_active >= ACTIVE_INTERVAL:
                     try:
                         c2 = self.om._check_active_positions()
@@ -231,7 +232,7 @@ class FVGBot:
                         logger.error(f"Active check error: {e}")
                     last_active = time.time()
 
-                # ── SCAN LOOP (60s) ───────────────────────────
+                # ── SCAN LOOP (90s) ───────────────────────────
                 if now - last_scan >= SCAN_INTERVAL:
                     active  = self.om.count_active_trades()
                     pending = len(self.om.pending_orders)
@@ -259,14 +260,17 @@ class FVGBot:
                                     logger.error(f"[{sym}] BinanceError: {e}")
                             except Exception as e:
                                 logger.error(f"[{sym}] Eroare: {e}")
-                            time.sleep(0.15)
+                            
+                            # PROTECȚIE RATE LIMIT: Pauză crescută la 0.5s (de la 0.15s)
+                            # Permite IP-ului să respire când rulează doi boți simultan
+                            time.sleep(0.5)
 
-                        logger.info(f"Ciclu complet | {datetime.now(timezone.utc).strftime('%H:%M:%S')} UTC | "
-                                    f"Pozitii: {self.om.count_active_trades()}/{config.MAX_OPEN_TRADES} | "
-                                    f"Pending: {len(self.om.pending_orders)}")
+                    logger.info(f"Ciclu complet | {datetime.now(timezone.utc).strftime('%H:%M:%S')} UTC | "
+                                f"Pozitii: {self.om.count_active_trades()}/{config.MAX_OPEN_TRADES} | "
+                                f"Pending: {len(self.om.pending_orders)}")
 
-                    self.check_and_send_report()
-                    last_scan = time.time()
+                self.check_and_send_report()
+                last_scan = time.time()
 
                 time.sleep(2)  # sleep mic — loop rapid
 
