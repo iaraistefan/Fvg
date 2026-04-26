@@ -188,29 +188,48 @@ class FVGBot:
         self.om.reconcile_with_binance()
         logger.info("Bot pornit. Ctrl+C pentru oprire.")
 
-        CHECK_INTERVAL = 10   # verifica umpleri la fiecare 10s
-        SCAN_INTERVAL  = 60   # scaneaza simboluri la fiecare 60s
+        PENDING_INTERVAL = 10   # verifica ordine umplute la 10s
+        ACTIVE_INTERVAL  = 30   # verifica pozitii inchise la 30s
+        SCAN_INTERVAL    = 60   # scaneaza simboluri la fiecare 60s
 
-        last_check = 0
-        last_scan  = 0
+        last_pending = 0
+        last_active  = 0
+        last_scan    = 0
 
         while True:
             try:
                 now = time.time()
 
-                # ── CHECK LOOP (10s) ──────────────────────────
-                if now - last_check >= CHECK_INTERVAL:
+                # ── PENDING CHECK (10s) ───────────────────────
+                if now - last_pending >= PENDING_INTERVAL:
                     try:
-                        self.om.check_filled_orders()
+                        c1 = self.om._check_pending()
+                        c3 = self.om._expire_old_orders()
+                        if c1 or c3:
+                            self.om._save()
                     except BinanceAPIException as e:
                         if e.code == -1003:
-                            logger.warning("Rate limit check — astept 30s...")
-                            time.sleep(30)
+                            logger.warning("Rate limit check pending — skip")
                         else:
-                            logger.error(f"Check error: {e}")
+                            logger.error(f"Pending check error: {e}")
                     except Exception as e:
-                        logger.error(f"Check error: {e}")
-                    last_check = time.time()
+                        logger.error(f"Pending check error: {e}")
+                    last_pending = time.time()
+
+                # ── ACTIVE CHECK (30s) ────────────────────────
+                if now - last_active >= ACTIVE_INTERVAL:
+                    try:
+                        c2 = self.om._check_active_positions()
+                        if c2:
+                            self.om._save()
+                    except BinanceAPIException as e:
+                        if e.code == -1003:
+                            logger.warning("Rate limit check active — skip")
+                        else:
+                            logger.error(f"Active check error: {e}")
+                    except Exception as e:
+                        logger.error(f"Active check error: {e}")
+                    last_active = time.time()
 
                 # ── SCAN LOOP (60s) ───────────────────────────
                 if now - last_scan >= SCAN_INTERVAL:
