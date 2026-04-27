@@ -1,10 +1,10 @@
 """
-FVG WITH-TREND BOT 4H — v4
-Fix-uri aplicate:
-  1. Double-loop: CHECK la 10s + SCAN la 60s
-  2. last_candle_ts setat indiferent de rezultatul plasarii
-  3. Offset 30s la startup fata de botul 1H
-  4. Ajustare Rate-Limit pentru IP partajat (Render)
+FVG WITH-TREND BOT 4H — v5 FINAL
+- Scaneaza TOATE simbolurile (558 USDT futures)
+- Triple-loop: PENDING 30s + ACTIVE 60s + SCAN 300s
+- Delay 0.4s intre simboluri (safe rate)
+- NU mai opreste scan-ul la -1003
+- Offset 60s la startup fata de 1H
 """
 import sys, io, time, logging
 from datetime import datetime, timezone
@@ -41,15 +41,13 @@ class FVGBot:
         self.stats = {"start": datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC")}
 
         logger.info("═══════════════════════════════════════════════════════")
-        logger.info("  FVG WITH-TREND BOT 4H — v4")
+        logger.info("  FVG WITH-TREND BOT 4H — v5 (scan complet)")
         logger.info(f"  TF: {config.TIMEFRAME} | Leverage: {config.LEVERAGE}x | USDT/trade: {config.USDT_PER_TRADE}")
         logger.info(f"  EMA: {config.EMA_FAST}/{config.EMA_SLOW} | Slope: {config.EMA_MIN_SLOPE*100:.1f}%/{config.EMA_SLOPE_BARS}bars")
         logger.info(f"  Max pozitii: {config.MAX_OPEN_TRADES} | Expiry: {config.ORDER_EXPIRY_HOURS}h")
         logger.info("═══════════════════════════════════════════════════════")
 
-    # ─────────────────────────────────────────────
-    #  SIMBOLURI + KLINES
-    # ─────────────────────────────────────────────
+    # ─── SIMBOLURI + KLINES ────────────────────────
 
     def get_symbols(self) -> list:
         now_ts = time.time()
@@ -68,8 +66,8 @@ class FVGBot:
             return syms
         except BinanceAPIException as e:
             if e.code == -1003:
-                logger.warning("Rate limit get_symbols — astept 60s si retry...")
-                time.sleep(60)
+                logger.warning("get_symbols: rate limit — sleep 30s + retry")
+                time.sleep(30)
                 try:
                     info = self.client.futures_exchange_info()
                     syms = [s["symbol"] for s in info["symbols"]
@@ -81,11 +79,10 @@ class FVGBot:
                     return syms
                 except Exception:
                     return cache
-            else:
-                logger.error(f"get_symbols error: {e}")
+            logger.error(f"get_symbols: {e}")
             return cache
         except Exception as e:
-            logger.error(f"get_symbols error: {e}")
+            logger.error(f"get_symbols: {e}")
             return cache
 
     def get_klines(self, symbol: str) -> list:
@@ -96,7 +93,9 @@ class FVGBot:
             return klines[:-1]
         except BinanceAPIException as e:
             if e.code == -1003:
-                raise  # propagheaza in sus → break din for loop
+                # Soft throttle — sleep scurt si return [] (nu opri scan-ul!)
+                time.sleep(2)
+                return []
             if e.code != -1121:
                 logger.warning(f"[{symbol}] klines: {e}")
             return []
@@ -104,9 +103,7 @@ class FVGBot:
             logger.warning(f"[{symbol}] klines: {e}")
             return []
 
-    # ─────────────────────────────────────────────
-    #  SCAN SIMBOL
-    # ─────────────────────────────────────────────
+    # ─── SCAN ──────────────────────────────────────
 
     def scan_symbol(self, symbol: str):
         klines = self.get_klines(symbol)
@@ -120,9 +117,6 @@ class FVGBot:
             return
 
         setup = detect_fvg(symbol, df)
-
-        # FIX: seteaza last_candle_ts INDIFERENT de rezultat
-        # Evita detectarea repetata a aceluiasi semnal
         self.last_candle_ts[symbol] = last_ts
 
         if setup is None:
@@ -143,9 +137,7 @@ class FVGBot:
         success = self.om.place_fvg_trade(setup)
         notify_trade(setup, success)
 
-    # ─────────────────────────────────────────────
-    #  RAPORT
-    # ─────────────────────────────────────────────
+    # ─── RAPORT ────────────────────────────────────
 
     def check_and_send_report(self):
         if time.time() - self.last_report_time >= config.TELEGRAM_REPORT_HOURS * 3600:
@@ -168,30 +160,28 @@ class FVGBot:
             self.last_report_time = time.time()
             logger.info("Raport Telegram trimis.")
 
-    # ─────────────────────────────────────────────
-    #  RUN — DOUBLE LOOP
-    # ─────────────────────────────────────────────
+    # ─── RUN — TRIPLE LOOP ─────────────────────────
 
     def run(self):
         """
-        Double-loop:
-        - CHECK LOOP (10s): check_filled_orders — detecteaza umpleri rapid,
-          plaseaza SL/TP imediat ce ordinul e umplut
-        - SCAN LOOP (60s): scaneaza simboluri, deschide ordine noi
-
-        Offset 30s la startup fata de botul 1H — evita
-        scanare simultana pe acelasi IP Render.
+        - Offset 60s la startup (1H ruleaza primul)
+        - PENDING (30s): batch check ordine umplute
+        - ACTIVE  (60s): check pozitii inchise
+        - SCAN  (300s): scaneaza TOATE simbolurile la fiecare 5 min
+        
+        4H scan complet 558 simboluri × 0.4s = ~223s
+        Interval 300s = 5 min → suficient + buffer.
         """
-        logger.info("Startup offset 30s (evita rate limit cu botul 1H)...")
-        time.sleep(30)
+        logger.info("Startup offset 60s (asteapta sa porneasca 1H primul)...")
+        time.sleep(60)
 
         logger.info("Reconciliere cu Binance...")
         self.om.reconcile_with_binance()
-        logger.info("Bot pornit. Ctrl+C pentru oprire.")
+        logger.info("Bot 4H pornit. Ctrl+C pentru oprire.")
 
-        PENDING_INTERVAL = 30   # verifica ordine umplute la 30s (reduce rate limit)
-        ACTIVE_INTERVAL  = 60   # verifica pozitii inchise la 60s
-        SCAN_INTERVAL    = 90   # scaneaza simboluri la fiecare 90s
+        PENDING_INTERVAL = 30
+        ACTIVE_INTERVAL  = 60
+        SCAN_INTERVAL    = 300   # 5 minute pe 4H — TF mai mare, scan mai rar
 
         last_pending = 0
         last_active  = 0
@@ -201,7 +191,7 @@ class FVGBot:
             try:
                 now = time.time()
 
-                # ── PENDING CHECK (30s) ───────────────────────
+                # ── PENDING (30s) ────────────────────
                 if now - last_pending >= PENDING_INTERVAL:
                     try:
                         c1 = self.om._check_pending()
@@ -209,30 +199,26 @@ class FVGBot:
                         if c1 or c3:
                             self.om._save()
                     except BinanceAPIException as e:
-                        if e.code == -1003:
-                            logger.warning("Rate limit check pending — skip")
-                        else:
-                            logger.error(f"Pending check error: {e}")
+                        if e.code != -1003:
+                            logger.error(f"Pending check: {e}")
                     except Exception as e:
-                        logger.error(f"Pending check error: {e}")
+                        logger.error(f"Pending check: {e}")
                     last_pending = time.time()
 
-                # ── ACTIVE CHECK (60s) ────────────────────────
+                # ── ACTIVE (60s) ─────────────────────
                 if now - last_active >= ACTIVE_INTERVAL:
                     try:
                         c2 = self.om._check_active_positions()
                         if c2:
                             self.om._save()
                     except BinanceAPIException as e:
-                        if e.code == -1003:
-                            logger.warning("Rate limit check active — skip")
-                        else:
-                            logger.error(f"Active check error: {e}")
+                        if e.code != -1003:
+                            logger.error(f"Active check: {e}")
                     except Exception as e:
-                        logger.error(f"Active check error: {e}")
+                        logger.error(f"Active check: {e}")
                     last_active = time.time()
 
-                # ── SCAN LOOP (90s) ───────────────────────────
+                # ── SCAN (300s) — TOATE SIMBOLURILE ──
                 if now - last_scan >= SCAN_INTERVAL:
                     active  = self.om.count_active_trades()
                     pending = len(self.om.pending_orders)
@@ -240,39 +226,36 @@ class FVGBot:
                     if active >= config.MAX_OPEN_TRADES:
                         logger.info(f"PAUZA — {active}/{config.MAX_OPEN_TRADES} pozitii")
                     else:
-                        symbols = self.get_symbols()[:75]
-                        logger.info(f"Scanez {len(symbols)} perechi | "
+                        symbols = self.get_symbols()
+                        scan_start = time.time()
+                        logger.info(f"SCAN COMPLET: {len(symbols)} perechi | "
                                     f"Pozitii: {active}/{config.MAX_OPEN_TRADES} | "
                                     f"Pending: {pending}")
 
+                        scanned = 0
                         for sym in symbols:
                             if self.om.count_active_trades() >= config.MAX_OPEN_TRADES:
-                                logger.info("Limita atinsa — opresc scanarea")
+                                logger.info("Limita atinsa — opresc scan")
                                 break
                             try:
                                 self.scan_symbol(sym)
+                                scanned += 1
                             except BinanceAPIException as e:
-                                if e.code == -1003:
-                                    logger.warning("Rate limit scan — astept 60s...")
-                                    time.sleep(60)
-                                    break
-                                else:
-                                    logger.error(f"[{sym}] BinanceError: {e}")
+                                # NU opreste scan-ul — continua
+                                logger.error(f"[{sym}] BinanceError: {e}")
                             except Exception as e:
                                 logger.error(f"[{sym}] Eroare: {e}")
-                            
-                            # PROTECȚIE RATE LIMIT: Pauză crescută la 0.5s (de la 0.15s)
-                            # Permite IP-ului să respire când rulează doi boți simultan
-                            time.sleep(0.5)
+                            time.sleep(0.40)
 
-                    logger.info(f"Ciclu complet | {datetime.now(timezone.utc).strftime('%H:%M:%S')} UTC | "
-                                f"Pozitii: {self.om.count_active_trades()}/{config.MAX_OPEN_TRADES} | "
-                                f"Pending: {len(self.om.pending_orders)}")
+                        scan_dur = time.time() - scan_start
+                        logger.info(f"Ciclu complet | {datetime.now(timezone.utc).strftime('%H:%M:%S')} UTC | "
+                                    f"Scanate: {scanned}/{len(symbols)} in {scan_dur:.0f}s | "
+                                    f"Pozitii: {self.om.count_active_trades()}/{config.MAX_OPEN_TRADES}")
 
-                self.check_and_send_report()
-                last_scan = time.time()
+                    self.check_and_send_report()
+                    last_scan = time.time()
 
-                time.sleep(2)  # sleep mic — loop rapid
+                time.sleep(2)
 
             except KeyboardInterrupt:
                 logger.info("Bot oprit.")
