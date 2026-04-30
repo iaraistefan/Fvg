@@ -205,12 +205,14 @@ class FVGBot:
                         logger.error(f"Pending check: {e}")
                     last_pending = time.time()
 
-                # ── ACTIVE (60s) ─────────────────────
+                # ── ACTIVE (60s) — check + SL watchdog ─
                 if now - last_active >= ACTIVE_INTERVAL:
                     try:
                         c2 = self.om._check_active_positions()
                         if c2:
                             self.om._save()
+                        # SL Watchdog — verifica si plaseaza SL/TP lipsa
+                        self.om.sl_watchdog()
                     except BinanceAPIException as e:
                         if e.code != -1003:
                             logger.error(f"Active check: {e}")
