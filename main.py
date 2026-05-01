@@ -1,4 +1,4 @@
-"""
+   """
 FVG WITH-TREND BOT 4H — v6 FINAL
 - Scaneaza TOATE simbolurile (551 USDT futures)
 - Triple-loop: PENDING 30s + ACTIVE 60s + SCAN 900s
