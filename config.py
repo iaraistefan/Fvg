@@ -31,11 +31,13 @@ EMA_PARALLEL_MIN = 0.25
 EMA_PARALLEL_MAX = 4.0
 MAX_CONSEC_AGGR  = 1
 
+# ─── DAILY LOSS LIMIT ───────────────────────────────────────
+DAILY_LOSS_LIMIT_PCT = 0.20   # 20% din capital/zi
+
 # ─── SCANNING ───────────────────────────────────────────────
-SCAN_INTERVAL_SEC = 60
+SCAN_INTERVAL_SEC = 900   # 900s — alterneaza cu 1H (700s)
 
 # ─── BLACKLIST ──────────────────────────────────────────────
-# MAX_LOSS_PCT_EMERGENCY eliminat — gestionat de Guardian extern
 BLACKLIST = [
     "BTCDOMUSDT", "DEFIUSDT", "XPDUSDT",
     "1000WHYUSDT", "USDCUSDT", "INTCUSDT",
@@ -50,5 +52,6 @@ TELEGRAM_CHAT_ID      = os.environ.get("TELEGRAM_CHAT_ID", "")
 TELEGRAM_REPORT_HOURS = 4
 
 # ─── FISIERE STATE ──────────────────────────────────────────
-STATE_FILE = "bot_state_4h.json"
-LOG_FILE   = "fvg_bot_4h.log"
+STATE_FILE   = "bot_state_4h.json"
+JOURNAL_FILE = "trading_journal_4h.csv"
+LOG_FILE     = "fvg_bot_4h.log"
